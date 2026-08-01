@@ -118,16 +118,16 @@ def extraer_rut_o_nombre(texto):
     return "NO_DETECTADO"
 
 
-def extraer_monto_chileno(celda):
-    """Extrae estrictamente números con formato de miles o montos válidos de una celda."""
-    if not celda:
+def extraer_monto_chileno(texto_o_celda):
+    """Extrae montos en formato chileno (con puntos o comas de miles)."""
+    if not texto_o_celda:
         return None
-    texto = str(celda).strip()
+    texto = str(texto_o_celda).strip()
     
-    # 1. Formato con puntos de miles (ej: 4.046.000, 347.071)
-    coincidencias = re.findall(r'\b\d{1,3}(?:\.\d{3})+\b', texto)
+    # 1. Coincidencias con separador de miles (puntos o comas, ej: 3,998,400 o 3.998.400)
+    coincidencias = re.findall(r'\b\d{1,3}(?:[.,]\d{3})+\b', texto)
     if coincidencias:
-        monto_str = coincidencias[-1].replace('.', '')
+        monto_str = coincidencias[-1].replace('.', '').replace(',', '')
         try:
             val = int(monto_str)
             if val > 500:
@@ -135,7 +135,7 @@ def extraer_monto_chileno(celda):
         except ValueError:
             pass
             
-    # 2. Números enteros de 5 o más dígitos (evita años de 4 dígitos como 2026)
+    # 2. Enteros de 5 a 9 dígitos aislados (evita años como 2026)
     enteros = re.findall(r'\b\d{5,9}\b', texto)
     if enteros:
         return int(enteros[-1])
@@ -144,7 +144,7 @@ def extraer_monto_chileno(celda):
 
 
 def normalizar_cartola(archivo_subido):
-    """Lee la cartola bancaria y reporta adecuadamente las filas sin monto como incompletas."""
+    """Lee la cartola bancaria soportando comas/puntos y omitiendo celdas vacías."""
     nombre_archivo = archivo_subido.name.lower()
     try:
         registros_ok = []
@@ -153,7 +153,7 @@ def normalizar_cartola(archivo_subido):
         palabras_ignorar = [
             'saldo inicial', 'saldo final', 'cartola de cuenta', 
             'canal o sucursal', 'nro. docto', 'abonos (clp)', 
-            'monto abono', 'fecha descripción'
+            'monto abono', 'fecha descripción', 'movimientos'
         ]
 
         if nombre_archivo.endswith('.pdf'):
@@ -165,28 +165,29 @@ def normalizar_cartola(archivo_subido):
                             if not fila:
                                 continue
                             
-                            f_clean = [str(c).strip().replace('\n', ' ') if c else "" for c in fila]
+                            # Limpieza de celdas
+                            f_clean = [str(c).strip().replace('\n', ' ') for c in fila if c is not None and str(c).strip() != '']
                             texto_fila = " ".join(f_clean)
                             texto_lower = texto_fila.lower()
                             
-                            # Ignorar encabezados del PDF
-                            if not any(f_clean) or any(p in texto_lower for p in palabras_ignorar):
+                            # Ignorar encabezados
+                            if not f_clean or any(p in texto_lower for p in palabras_ignorar):
                                 continue
                             
-                            # Buscar el monto específicamente en la última celda disponible
-                            monto_encontrado = None
-                            for celda in reversed(f_clean):
-                                if celda:
-                                    m = extraer_monto_chileno(celda)
-                                    if m:
-                                        monto_encontrado = m
-                                        break
-
+                            # Extraer Fecha
                             match_fecha = re.search(r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b', texto_fila)
                             fecha = match_fecha.group(0) if match_fecha else "S/F"
                             
+                            # Extraer Monto buscando prioritariamente en la última celda válida
+                            monto_encontrado = None
+                            for celda in reversed(f_clean):
+                                m = extraer_monto_chileno(celda)
+                                if m:
+                                    monto_encontrado = m
+                                    break
+                            
                             identificador = extraer_rut_o_nombre(texto_fila)
-                            glosa_limpia = re.sub(r'\b\d{1,3}(?:\.\d{3})+\b', '', texto_fila).strip()
+                            glosa_limpia = re.sub(r'\b\d{1,3}(?:[.,]\d{3})+\b', '', texto_fila).strip()
 
                             if monto_encontrado:
                                 registros_ok.append({
@@ -196,13 +197,12 @@ def normalizar_cartola(archivo_subido):
                                     'Descripción Glosa': glosa_limpia[:120]
                                 })
                             else:
-                                # Si no se encontró un monto legible, va a revisión manual
                                 if len(texto_fila) > 10:
                                     registros_dudosos.append({
                                         'Página': num_pag,
                                         'Fecha': fecha,
-                                        'Glosa Capturada': glosa_limpia[:100],
-                                        'Observación': 'Monto en blanco o incompleto (requiere revisión)'
+                                        'Glosa Capturada': texto_fila[:100],
+                                        'Observación': 'Fila incompleta o monto en blanco'
                                     })
 
         elif nombre_archivo.endswith(('.xlsx', '.xls', '.csv')):
@@ -216,13 +216,6 @@ def normalizar_cartola(archivo_subido):
                         'Identificador / Cliente': extraer_rut_o_nombre(texto_fila),
                         'Monto Pago': m,
                         'Descripción Glosa': texto_fila[:100]
-                    })
-                else:
-                    registros_dudosos.append({
-                        'Página': 1,
-                        'Fecha': 'VER_EXCEL',
-                        'Glosa Capturada': texto_fila[:100],
-                        'Observación': 'Monto en blanco o incompleto'
                     })
 
         df_ok = pd.DataFrame(registros_ok).reset_index(drop=True) if registros_ok else pd.DataFrame(columns=['Fecha', 'Identificador / Cliente', 'Monto Pago', 'Descripción Glosa'])
@@ -369,7 +362,7 @@ with tab1:
 
             if df_incompletos is not None and not df_incompletos.empty:
                 st.warning(f"⚠️ **Atención:** Se detectaron **{len(df_incompletos)}** fila(s) pendientes o que requieren revisión manual.")
-                with st.expander("🔍 Ver transacciones para revisión manual", expanded=True):
+                with st.expander("🔍 Ver transacciones para revisión manual", expanded=False):
                     st.dataframe(df_incompletos, use_container_width=True, hide_index=True)
         else:
             st.error(f"Error al leer Cartola: {estado_cartola}")
