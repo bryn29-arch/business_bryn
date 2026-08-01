@@ -5,7 +5,7 @@ import re
 import pdfplumber
 
 # ---------------------------------------------------------
-# CONFIGURACIÓN DE PÁGINA Y CSS ENTERPRISE
+# CONFIGURACIÓN DE PÁGINA Y CSS LUXURY ENTERPRISE
 # ---------------------------------------------------------
 st.set_page_config(
     page_title="FinanSmart | Plataforma de Conciliación",
@@ -13,48 +13,81 @@ st.set_page_config(
     layout="wide"
 )
 
-# Estilos CSS personalizados para "Enterprise Look"
+# Estilos CSS Luxury & Executive Look
 st.markdown("""
     <style>
+    /* Fondo principal con degradado sutil ejecutivo */
     .stApp {
-        background-color: #f8f9fa;
+        background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
     }
     
+    /* Contenedor del Cargador de Archivos Estilo Lujo */
     div[data-testid="stFileUploader"] {
-        background-color: #ffffff;
-        border: 2px dashed #4b6bfb;
-        border-radius: 12px;
-        padding: 15px;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
-        transition: all 0.3s ease-in-out;
+        background: #ffffff;
+        border: 1.5px solid #e2e8f0;
+        border-radius: 16px;
+        padding: 24px;
+        box-shadow: 0 10px 25px -5px rgba(15, 23, 42, 0.05), 0 8px 10px -6px rgba(15, 23, 42, 0.01);
+        transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+        position: relative;
     }
     
     div[data-testid="stFileUploader"]:hover {
-        border-color: #1d3557;
-        box-shadow: 0 6px 16px rgba(75, 107, 251, 0.15);
-        transform: translateY(-2px);
+        border-color: #6366f1;
+        box-shadow: 0 20px 30px -10px rgba(99, 102, 241, 0.15), 0 10px 15px -5px rgba(99, 102, 241, 0.08);
+        transform: translateY(-3px);
     }
     
-    div[data-testid="stFileUploader"] button {
-        background-color: #4b6bfb !important;
-        color: white !important;
-        border-radius: 8px !important;
-        border: none !important;
+    /* Botones Lujosos con Gradiente Metálico e Iluminación */
+    div[data-testid="stFileUploader"] button, .stButton > button {
+        background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%) !important;
+        color: #ffffff !important;
+        border-radius: 10px !important;
+        border: 1px solid rgba(255, 255, 255, 0.15) !important;
         font-weight: 600 !important;
-        padding: 8px 16px !important;
-        box-shadow: 0 2px 6px rgba(75, 107, 251, 0.3);
+        font-size: 0.9rem !important;
+        letter-spacing: 0.4px !important;
+        padding: 10px 22px !important;
+        box-shadow: 0 4px 14px 0 rgba(15, 23, 42, 0.35) !important;
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
     }
     
-    div[data-testid="stFileUploader"] button:hover {
-        background-color: #3b52d4 !important;
+    div[data-testid="stFileUploader"] button:hover, .stButton > button:hover {
+        background: linear-gradient(135deg, #312e81 0%, #1e1b4b 100%) !important;
+        box-shadow: 0 6px 20px 0 rgba(49, 46, 129, 0.45) !important;
+        border-color: #818cf8 !important;
+        transform: translateY(-1px) scale(1.02);
     }
     
+    /* Tarjetas Métricas Lujosas (Kpis) */
     div[data-testid="stMetric"] {
-        background-color: #ffffff;
-        padding: 15px;
-        border-radius: 10px;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.04);
-        border-left: 5px solid #4b6bfb;
+        background: linear-gradient(145deg, #ffffff 0%, #f8fafc 100%);
+        padding: 20px;
+        border-radius: 14px;
+        border: 1px solid #e2e8f0;
+        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.03);
+        border-left: 5px solid #4f46e5;
+    }
+    
+    div[data-testid="stMetricLabel"] {
+        font-weight: 600;
+        color: #64748b;
+        font-size: 0.88rem;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+
+    div[data-testid="stMetricValue"] {
+        color: #0f172a;
+        font-weight: 700;
+    }
+
+    /* Títulos y Subtítulos Estilizados */
+    h1, h2, h3 {
+        color: #0f172a;
+        font-weight: 700;
+        letter-spacing: -0.5px;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -155,16 +188,13 @@ def normalizar_cartola(archivo_subido):
                         'descripcion_glosa': texto_fila[:100]
                     })
 
-        df_ok = pd.DataFrame(registros_ok).drop_duplicates().reset_index(drop=True) if registros_ok else pd.DataFrame()
-        df_dudosos = pd.DataFrame(registros_dudosos).drop_duplicates().reset_index(drop=True) if registros_dudosos else pd.DataFrame()
-
-        if df_ok.empty and df_dudosos.empty:
-            return None, None, "No se identificaron movimientos en el archivo."
+        df_ok = pd.DataFrame(registros_ok).drop_duplicates().reset_index(drop=True) if registros_ok else pd.DataFrame(columns=['fecha', 'identificador_cliente', 'monto_pago', 'descripcion_glosa'])
+        df_dudosos = pd.DataFrame(registros_dudosos).drop_duplicates().reset_index(drop=True) if registros_dudosos else pd.DataFrame(columns=['Página', 'Fecha', 'Glosa Capturada', 'Observación'])
 
         return df_ok, df_dudosos, "OK"
 
     except Exception as e:
-        return None, None, f"Error al procesar: {str(e)}"
+        return pd.DataFrame(), pd.DataFrame(), f"Error al procesar: {str(e)}"
 
 
 def normalizar_ventas(archivo_subido):
@@ -274,19 +304,21 @@ with col_res1:
         st.subheader("2. Cartola Bancaria Normalizada")
         df_cartola, df_incompletos, estado_cartola = normalizar_cartola(archivo_cartola)
         
-        if estado_cartola == "OK" and df_cartola is not None:
+        if estado_cartola == "OK":
+            total_ingresos = df_cartola['monto_pago'].sum() if not df_cartola.empty and 'monto_pago' in df_cartola.columns else 0
             st.success(f"¡Cartola procesada! **{len(df_cartola)}** abonos listos.")
-            st.metric("Total Ingresos Confirmados", f"$ {df_cartola['monto_pago'].sum():,.0f}".replace(",", "."))
+            st.metric("Total Ingresos Confirmados", f"$ {total_ingresos:,.0f}".replace(",", "."))
             
-            st.dataframe(
-                df_cartola.style.format({'monto_pago': '$ {:,.0f}'}), 
-                use_container_width=True,
-                height=380
-            )
+            if not df_cartola.empty:
+                st.dataframe(
+                    df_cartola.style.format({'monto_pago': '$ {:,.0f}'}), 
+                    use_container_width=True,
+                    height=380
+                )
 
             if df_incompletos is not None and not df_incompletos.empty:
-                st.warning(f"⚠️ **Atención:** Se detectaron **{len(df_incompletos)}** fila(s) con posible omisión o requiere revisión manual.")
-                with st.expander("🔍 Ver transacciones pendientes de revisión", expanded=False):
+                st.warning(f"⚠️ **Atención:** Se detectaron **{len(df_incompletos)}** fila(s) pendientes o para revisión manual.")
+                with st.expander("🔍 Ver transacciones para revisión manual", expanded=True):
                     st.dataframe(df_incompletos, use_container_width=True)
         else:
             st.error(f"Error al leer Cartola: {estado_cartola}")
@@ -296,14 +328,16 @@ with col_res2:
         st.subheader("3. Registro de Ventas Normalizado")
         df_ventas, estado_ventas = normalizar_ventas(archivo_ventas)
         if estado_ventas == "OK" and df_ventas is not None:
+            total_ventas = df_ventas['monto_total'].sum() if not df_ventas.empty and 'monto_total' in df_ventas.columns else 0
             st.success(f"¡Ventas procesadas! **{len(df_ventas)}** facturas cargadas.")
-            st.metric("Total Ventas Emitidas", f"$ {df_ventas['monto_total'].sum():,.0f}".replace(",", "."))
+            st.metric("Total Ventas Emitidas", f"$ {total_ventas:,.0f}".replace(",", "."))
             
-            st.dataframe(
-                df_ventas.style.format({'monto_total': '$ {:,.0f}'}), 
-                use_container_width=True,
-                height=380
-            )
+            if not df_ventas.empty:
+                st.dataframe(
+                    df_ventas.style.format({'monto_total': '$ {:,.0f}'}), 
+                    use_container_width=True,
+                    height=380
+                )
         else:
             st.error(f"Error al leer Ventas: {estado_ventas}")
 
