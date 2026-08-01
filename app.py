@@ -93,10 +93,11 @@ st.markdown("""
 # ---------------------------------------------------------
 
 def extraer_rut_o_nombre(texto):
-    """Detecta RUTs o razón social en la glosa."""
+    """Detecta RUTs o razón social en la glosa de forma robusta."""
     if not isinstance(texto, str):
         return "NO_DETECTADO"
     
+    # 1. RUT estándar con guión (ej: 96.902.390-3)
     match_std = re.search(r'\b(\d{1,2}(?:\.?\d{3}){2}-?[\dkK])\b', texto)
     if match_std:
         rut_raw = match_std.group(0).replace('.', '').upper()
@@ -104,11 +105,13 @@ def extraer_rut_o_nombre(texto):
             rut_raw = rut_raw[:-1] + '-' + rut_raw[-1]
         return rut_raw
 
+    # 2. RUT continuo de 8 u 9 dígitos (ej: 0969023903 -> 96902390-3)
     match_continuo = re.search(r'\b0?(\d{7,8}[\dkK])\b', texto)
     if match_continuo:
         raw = match_continuo.group(1).upper()
         return f"{raw[:-1]}-{raw[-1]}"
 
+    # 3. Razón social / Nombre
     match_nombre = re.search(r'(?:Traspaso De:|Pago:)\s*([A-Za-z0-9\s]+)', texto, re.IGNORECASE)
     if match_nombre:
         nombre = match_nombre.group(1).strip()
@@ -119,24 +122,34 @@ def extraer_rut_o_nombre(texto):
 
 
 def extraer_monto_chileno(texto_o_celda):
-    """Extrae montos en formato chileno (con puntos o comas de miles)."""
+    """
+    MOTOR UNIVERSAL DE MONTOS:
+    Procesa montos con formato de puntos (3.998.400), comas (3,998,400) o enteros simples.
+    """
     if not texto_o_celda:
         return None
     texto = str(texto_o_celda).strip()
+
+    # Si la celda es únicamente un decimal insignificante o vacía
+    if texto in ['', 'None', 'nan', '0']:
+        return None
+
+    # Eliminar decimales si vienen explícitos (ej: ,00 o .00 al final)
+    texto_limpio = re.sub(r'[,.]00$', '', texto)
     
-    # 1. Coincidencias con separador de miles (puntos o comas, ej: 3,998,400 o 3.998.400)
-    coincidencias = re.findall(r'\b\d{1,3}(?:[.,]\d{3})+\b', texto)
+    # 1. Patrón principal: Número con separadores de miles (puntos o comas) -> ej: 3.998.400 o 3,998,400 o 47,600
+    coincidencias = re.findall(r'\b\d{1,3}(?:[.,]\d{3})+\b', texto_limpio)
     if coincidencias:
         monto_str = coincidencias[-1].replace('.', '').replace(',', '')
         try:
             val = int(monto_str)
-            if val > 500:
+            if val > 500:  # Ignorar números de referencia pequeños
                 return val
         except ValueError:
             pass
-            
-    # 2. Enteros de 5 a 9 dígitos aislados (evita años como 2026)
-    enteros = re.findall(r'\b\d{5,9}\b', texto)
+
+    # 2. Patrón secundario: Enteros directos de 5 a 9 dígitos (evita años de 4 dígitos como 2026)
+    enteros = re.findall(r'\b\d{5,9}\b', texto_limpio)
     if enteros:
         return int(enteros[-1])
         
@@ -144,7 +157,7 @@ def extraer_monto_chileno(texto_o_celda):
 
 
 def normalizar_cartola(archivo_subido):
-    """Lee la cartola bancaria soportando comas/puntos y omitiendo celdas vacías."""
+    """Lee la cartola bancaria admitiendo múltiples formatos sin errores."""
     nombre_archivo = archivo_subido.name.lower()
     try:
         registros_ok = []
@@ -165,20 +178,18 @@ def normalizar_cartola(archivo_subido):
                             if not fila:
                                 continue
                             
-                            # Limpieza de celdas
                             f_clean = [str(c).strip().replace('\n', ' ') for c in fila if c is not None and str(c).strip() != '']
                             texto_fila = " ".join(f_clean)
                             texto_lower = texto_fila.lower()
                             
-                            # Ignorar encabezados
+                            # Ignorar filas de encabezados
                             if not f_clean or any(p in texto_lower for p in palabras_ignorar):
                                 continue
                             
-                            # Extraer Fecha
                             match_fecha = re.search(r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b', texto_fila)
                             fecha = match_fecha.group(0) if match_fecha else "S/F"
                             
-                            # Extraer Monto buscando prioritariamente en la última celda válida
+                            # Buscar el monto de derecha a izquierda (donde suele estar la columna Abono)
                             monto_encontrado = None
                             for celda in reversed(f_clean):
                                 m = extraer_monto_chileno(celda)
@@ -216,6 +227,13 @@ def normalizar_cartola(archivo_subido):
                         'Identificador / Cliente': extraer_rut_o_nombre(texto_fila),
                         'Monto Pago': m,
                         'Descripción Glosa': texto_fila[:100]
+                    })
+                else:
+                    registros_dudosos.append({
+                        'Página': 1,
+                        'Fecha': 'VER_EXCEL',
+                        'Glosa Capturada': texto_fila[:100],
+                        'Observación': 'Fila incompleta o monto en blanco'
                     })
 
         df_ok = pd.DataFrame(registros_ok).reset_index(drop=True) if registros_ok else pd.DataFrame(columns=['Fecha', 'Identificador / Cliente', 'Monto Pago', 'Descripción Glosa'])
@@ -362,7 +380,7 @@ with tab1:
 
             if df_incompletos is not None and not df_incompletos.empty:
                 st.warning(f"⚠️ **Atención:** Se detectaron **{len(df_incompletos)}** fila(s) pendientes o que requieren revisión manual.")
-                with st.expander("🔍 Ver transacciones para revisión manual", expanded=False):
+                with st.expander("🔍 Ver transacciones para revisión manual", expanded=True):
                     st.dataframe(df_incompletos, use_container_width=True, hide_index=True)
         else:
             st.error(f"Error al leer Cartola: {estado_cartola}")
@@ -395,4 +413,3 @@ with tab2:
             st.error(f"Error al leer Ventas: {estado_ventas}")
     else:
         st.info("Sube un archivo de registro de ventas en la sección superior para visualizar los datos.")
-
