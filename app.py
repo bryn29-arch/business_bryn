@@ -89,15 +89,15 @@ st.markdown("""
 
 
 # ---------------------------------------------------------
-# 1. FUNCIONES MOTORAS DE PROCESAMIENTO (MEJORADAS)
+# 1. FUNCIONES MOTORAS DE PROCESAMIENTO
 # ---------------------------------------------------------
 
 def extraer_rut_o_nombre(texto):
-    """Detecta RUTs con o sin formato (ej. 0969023903, 96.902.390-3) o razos sociales."""
+    """Detecta RUTs o razón social en la glosa."""
     if not isinstance(texto, str):
         return "NO_DETECTADO"
     
-    # 1. Buscar RUT estándar con guión
+    # 1. RUT estándar con o sin guión
     match_std = re.search(r'\b(\d{1,2}(?:\.?\d{3}){2}-?[\dkK])\b', texto)
     if match_std:
         rut_raw = match_std.group(0).replace('.', '').upper()
@@ -105,16 +105,16 @@ def extraer_rut_o_nombre(texto):
             rut_raw = rut_raw[:-1] + '-' + rut_raw[-1]
         return rut_raw
 
-    # 2. Buscar RUT continuo de 8 o 9 dígitos (ej: 0969023903 -> 96902390-3)
+    # 2. RUT continuo de 8 u 9 dígitos
     match_continuo = re.search(r'\b0?(\d{7,8}[\dkK])\b', texto)
     if match_continuo:
         raw = match_continuo.group(1).upper()
         return f"{raw[:-1]}-{raw[-1]}"
 
-    # 3. Buscar Nombre / Razón social si existe patrón explícito
-    match_nombre = re.search(r'(?:Traspaso De:|Pago:|Workmate|Proveedores)\s*([A-Za-z0-9\s]+)', texto, re.IGNORECASE)
+    # 3. Extraer Nombre / Empresa si está presente
+    match_nombre = re.search(r'(?:Traspaso De:|Pago:)\s*([A-Za-z0-9\s]+)', texto, re.IGNORECASE)
     if match_nombre:
-        nombre = match_nombre.group(0).strip()
+        nombre = match_nombre.group(1).strip()
         nombre = re.sub(r'\s+(Internet|Cta|Cuenta|Transferencia|Oficina).*$', '', nombre, flags=re.IGNORECASE)
         return nombre[:35]
         
@@ -122,23 +122,20 @@ def extraer_rut_o_nombre(texto):
 
 
 def extraer_monto_chileno(texto_o_celda):
-    """Extrae montos numéricos con formato de miles por punto (.) o por coma (,)."""
+    """Extrae números en formato chileno de miles."""
     if not isinstance(texto_o_celda, str):
         texto_o_celda = str(texto_o_celda)
     
-    # Busca patrones tipo: 3,998,400 o 3.998.400 o 47,600
     coincidencias = re.findall(r'\b\d{1,3}(?:[.,]\d{3})+\b', texto_o_celda)
     if coincidencias:
-        # Tomamos el último monto que suele corresponder al abono o valor final
         monto_str = coincidencias[-1].replace('.', '').replace(',', '')
         try:
             val = int(monto_str)
-            if val > 500: # Ignorar montos insignificantes o códigos
+            if val > 500:
                 return val
         except ValueError:
             pass
             
-    # Búsqueda secundaria de enteros simples
     enteros = re.findall(r'\b\d{4,9}\b', texto_o_celda)
     if enteros:
         return int(enteros[-1])
@@ -147,7 +144,7 @@ def extraer_monto_chileno(texto_o_celda):
 
 
 def normalizar_cartola(archivo_subido):
-    """Lee la cartola en PDF/Excel y procesa montos y clientes sin enviarlos a dudosos por formato."""
+    """Lee la cartola admitiendo transacciones repetidas legítimas sin enviarlas a revisión."""
     nombre_archivo = archivo_subido.name.lower()
     try:
         registros_ok = []
@@ -168,7 +165,6 @@ def normalizar_cartola(archivo_subido):
                             if not any(f_clean) or any(x in texto_fila.lower() for x in ['saldo inicial', 'saldo final', 'cartola de cuenta']):
                                 continue
                             
-                            # Extraer Monto
                             monto_encontrado = None
                             for celda in reversed(f_clean):
                                 m = extraer_monto_chileno(celda)
@@ -179,7 +175,6 @@ def normalizar_cartola(archivo_subido):
                             if not monto_encontrado:
                                 monto_encontrado = extraer_monto_chileno(texto_fila)
 
-                            # Extraer Fecha
                             match_fecha = re.search(r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b', texto_fila)
                             fecha = match_fecha.group(0) if match_fecha else "S/F"
                             
@@ -194,12 +189,14 @@ def normalizar_cartola(archivo_subido):
                                     'Descripción Glosa': glosa_limpia[:120]
                                 })
                             else:
-                                registros_dudosos.append({
-                                    'Página': num_pag,
-                                    'Fecha': fecha,
-                                    'Glosa Capturada': texto_fila[:100],
-                                    'Observación': 'No se detectó un monto numérico válido'
-                                })
+                                # Solo entra aquí si realmente no hay un monto numérico computable
+                                if len(texto_fila) > 15:
+                                    registros_dudosos.append({
+                                        'Página': num_pag,
+                                        'Fecha': fecha,
+                                        'Glosa Capturada': texto_fila[:100],
+                                        'Observación': 'Fila sin monto legible'
+                                    })
 
         elif nombre_archivo.endswith(('.xlsx', '.xls', '.csv')):
             df_raw = pd.read_excel(archivo_subido) if nombre_archivo.endswith(('.xlsx', '.xls')) else pd.read_csv(archivo_subido)
@@ -214,8 +211,9 @@ def normalizar_cartola(archivo_subido):
                         'Descripción Glosa': texto_fila[:100]
                     })
 
-        df_ok = pd.DataFrame(registros_ok).drop_duplicates().reset_index(drop=True) if registros_ok else pd.DataFrame(columns=['Fecha', 'Identificador / Cliente', 'Monto Pago', 'Descripción Glosa'])
-        df_dudosos = pd.DataFrame(registros_dudosos).drop_duplicates().reset_index(drop=True) if registros_dudosos else pd.DataFrame(columns=['Página', 'Fecha', 'Glosa Capturada', 'Observación'])
+        # Permitir duplicados reales sin eliminar registros válidos
+        df_ok = pd.DataFrame(registros_ok).reset_index(drop=True) if registros_ok else pd.DataFrame(columns=['Fecha', 'Identificador / Cliente', 'Monto Pago', 'Descripción Glosa'])
+        df_dudosos = pd.DataFrame(registros_dudosos).reset_index(drop=True) if registros_dudosos else pd.DataFrame(columns=['Página', 'Fecha', 'Glosa Capturada', 'Observación'])
 
         return df_ok, df_dudosos, "OK"
 
@@ -292,7 +290,7 @@ def normalizar_ventas(archivo_subido):
 
 
 # ---------------------------------------------------------
-# 2. INTERFAZ GRÁFICA DE USUARIO (FRONT-END)
+# 2. INTERFAZ GRÁFICA DE USUARIO
 # ---------------------------------------------------------
 
 with st.sidebar:
@@ -391,3 +389,4 @@ with tab2:
             st.error(f"Error al leer Ventas: {estado_ventas}")
     else:
         st.info("Sube un archivo de registro de ventas en la sección superior para visualizar los datos.")
+
