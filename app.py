@@ -16,30 +16,28 @@ st.set_page_config(
 # Estilos CSS Luxury & Executive Look
 st.markdown("""
     <style>
-    /* Fondo principal con degradado sutil ejecutivo */
+    /* Fondo principal */
     .stApp {
         background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
     }
     
-    /* Contenedor del Cargador de Archivos Estilo Lujo */
+    /* Contenedor del Cargador de Archivos */
     div[data-testid="stFileUploader"] {
         background: #ffffff;
         border: 1.5px solid #e2e8f0;
         border-radius: 16px;
-        padding: 24px;
-        box-shadow: 0 10px 25px -5px rgba(15, 23, 42, 0.05), 0 8px 10px -6px rgba(15, 23, 42, 0.01);
-        transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1);
-        position: relative;
+        padding: 20px;
+        box-shadow: 0 10px 25px -5px rgba(15, 23, 42, 0.05);
+        transition: all 0.35s ease;
     }
     
     div[data-testid="stFileUploader"]:hover {
         border-color: #6366f1;
-        box-shadow: 0 20px 30px -10px rgba(99, 102, 241, 0.15), 0 10px 15px -5px rgba(99, 102, 241, 0.08);
-        transform: translateY(-3px);
+        box-shadow: 0 15px 30px -10px rgba(99, 102, 241, 0.15);
     }
     
-    /* Botones Lujosos con Gradiente Metálico e Iluminación */
+    /* Botones Lujosos */
     div[data-testid="stFileUploader"] button, .stButton > button {
         background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%) !important;
         color: #ffffff !important;
@@ -47,20 +45,11 @@ st.markdown("""
         border: 1px solid rgba(255, 255, 255, 0.15) !important;
         font-weight: 600 !important;
         font-size: 0.9rem !important;
-        letter-spacing: 0.4px !important;
         padding: 10px 22px !important;
         box-shadow: 0 4px 14px 0 rgba(15, 23, 42, 0.35) !important;
-        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
     }
     
-    div[data-testid="stFileUploader"] button:hover, .stButton > button:hover {
-        background: linear-gradient(135deg, #312e81 0%, #1e1b4b 100%) !important;
-        box-shadow: 0 6px 20px 0 rgba(49, 46, 129, 0.45) !important;
-        border-color: #818cf8 !important;
-        transform: translateY(-1px) scale(1.02);
-    }
-    
-    /* Tarjetas Métricas Lujosas (Kpis) */
+    /* Tarjetas Métricas Lujosas */
     div[data-testid="stMetric"] {
         background: linear-gradient(145deg, #ffffff 0%, #f8fafc 100%);
         padding: 20px;
@@ -73,7 +62,7 @@ st.markdown("""
     div[data-testid="stMetricLabel"] {
         font-weight: 600;
         color: #64748b;
-        font-size: 0.88rem;
+        font-size: 0.9rem;
         text-transform: uppercase;
         letter-spacing: 0.5px;
     }
@@ -81,13 +70,25 @@ st.markdown("""
     div[data-testid="stMetricValue"] {
         color: #0f172a;
         font-weight: 700;
+        font-size: 2rem;
     }
 
-    /* Títulos y Subtítulos Estilizados */
-    h1, h2, h3 {
-        color: #0f172a;
-        font-weight: 700;
-        letter-spacing: -0.5px;
+    /* Pestañas estilizadas */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 12px;
+    }
+
+    .stTabs [data-baseweb="tab"] {
+        background-color: #ffffff;
+        border-radius: 10px 10px 0px 0px;
+        padding: 12px 24px;
+        border: 1px solid #e2e8f0;
+        font-weight: 600;
+    }
+
+    .stTabs [aria-selected="true"] {
+        background-color: #1e293b !important;
+        color: #ffffff !important;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -115,7 +116,7 @@ def extraer_rut_o_nombre(texto):
     if match_nombre:
         nombre = match_nombre.group(1).strip()
         nombre = re.sub(r'\s+(Internet|Cta|Cuenta|Transferencia).*$', '', nombre, flags=re.IGNORECASE)
-        return f"NOMBRE: {nombre[:30]}"
+        return f"NOMBRE: {nombre[:35]}"
         
     return "NO_DETECTADO"
 
@@ -169,10 +170,10 @@ def normalizar_cartola(archivo_subido):
                                 })
                             else:
                                 registros_ok.append({
-                                    'fecha': fecha,
-                                    'identificador_cliente': identificador,
-                                    'monto_pago': monto_encontrado,
-                                    'descripcion_glosa': glosa_limpia[:120]
+                                    'Fecha': fecha,
+                                    'Identificador / Cliente': identificador,
+                                    'Monto Pago': monto_encontrado,
+                                    'Descripción Glosa': glosa_limpia[:120]
                                 })
 
         elif nombre_archivo.endswith(('.xlsx', '.xls', '.csv')):
@@ -182,13 +183,13 @@ def normalizar_cartola(archivo_subido):
                 montos = re.findall(r'\b\d{3,}\b', texto_fila)
                 if montos:
                     registros_ok.append({
-                        'fecha': 'VER_EXCEL',
-                        'identificador_cliente': extraer_rut_o_nombre(texto_fila),
-                        'monto_pago': int(montos[-1]),
-                        'descripcion_glosa': texto_fila[:100]
+                        'Fecha': 'VER_EXCEL',
+                        'Identificador / Cliente': extraer_rut_o_nombre(texto_fila),
+                        'Monto Pago': int(montos[-1]),
+                        'Descripción Glosa': texto_fila[:100]
                     })
 
-        df_ok = pd.DataFrame(registros_ok).drop_duplicates().reset_index(drop=True) if registros_ok else pd.DataFrame(columns=['fecha', 'identificador_cliente', 'monto_pago', 'descripcion_glosa'])
+        df_ok = pd.DataFrame(registros_ok).drop_duplicates().reset_index(drop=True) if registros_ok else pd.DataFrame(columns=['Fecha', 'Identificador / Cliente', 'Monto Pago', 'Descripción Glosa'])
         df_dudosos = pd.DataFrame(registros_dudosos).drop_duplicates().reset_index(drop=True) if registros_dudosos else pd.DataFrame(columns=['Página', 'Fecha', 'Glosa Capturada', 'Observación'])
 
         return df_ok, df_dudosos, "OK"
@@ -251,8 +252,15 @@ def normalizar_ventas(archivo_subido):
 
         df['rut_cliente'] = df['rut'].astype(str).apply(lambda x: extraer_rut_o_nombre(x) if 'NO_DETECTADO' not in extraer_rut_o_nombre(x) else x.replace('.', '').upper())
 
-        cols_finales = ['folio', 'rut_cliente', 'razon_social', 'monto_total']
-        return df[cols_finales].reset_index(drop=True), "OK"
+        df_final = df.rename(columns={
+            'folio': 'Folio',
+            'rut_cliente': 'RUT Cliente',
+            'razon_social': 'Razón Social',
+            'monto_total': 'Monto Total'
+        })
+
+        cols_finales = ['Folio', 'RUT Cliente', 'Razón Social', 'Monto Total']
+        return df_final[cols_finales].reset_index(drop=True), "OK"
 
     except Exception as e:
         return None, f"Error al procesar ventas: {str(e)}"
@@ -297,47 +305,66 @@ with col_ventas:
 
 st.divider()
 
-col_res1, col_res2 = st.columns(2)
+# Usar pestañas anchas para maximizar el área de lectura
+tab1, tab2 = st.tabs(["🏛️ Cartola Bancaria Normalizada", "📄 Registro de Ventas Normalizado"])
 
-with col_res1:
+with tab1:
     if archivo_cartola is not None:
-        st.subheader("2. Cartola Bancaria Normalizada")
         df_cartola, df_incompletos, estado_cartola = normalizar_cartola(archivo_cartola)
         
         if estado_cartola == "OK":
-            total_ingresos = df_cartola['monto_pago'].sum() if not df_cartola.empty and 'monto_pago' in df_cartola.columns else 0
-            st.success(f"¡Cartola procesada! **{len(df_cartola)}** abonos listos.")
-            st.metric("Total Ingresos Confirmados", f"$ {total_ingresos:,.0f}".replace(",", "."))
+            total_ingresos = df_cartola['Monto Pago'].sum() if not df_cartola.empty and 'Monto Pago' in df_cartola.columns else 0
+            
+            col_kpi, col_info = st.columns([1, 2])
+            with col_kpi:
+                st.metric("Total Ingresos Confirmados", f"$ {total_ingresos:,.0f}".replace(",", "."))
+            with col_info:
+                st.success(f"¡Cartola procesada correctamente! Se identificaron **{len(df_cartola)}** abonos válidos.")
+
+            st.divider()
             
             if not df_cartola.empty:
+                st.markdown("##### 📋 Listado Completo de Transacciones Procesadas")
                 st.dataframe(
-                    df_cartola.style.format({'monto_pago': '$ {:,.0f}'}), 
+                    df_cartola.style.format({'Monto Pago': '$ {:,.0f}'}), 
                     use_container_width=True,
-                    height=380
+                    hide_index=True,
+                    height=450
                 )
 
             if df_incompletos is not None and not df_incompletos.empty:
-                st.warning(f"⚠️ **Atención:** Se detectaron **{len(df_incompletos)}** fila(s) pendientes o para revisión manual.")
+                st.warning(f"⚠️ **Atención:** Se detectaron **{len(df_incompletos)}** fila(s) pendientes o que requieren revisión manual.")
                 with st.expander("🔍 Ver transacciones para revisión manual", expanded=True):
-                    st.dataframe(df_incompletos, use_container_width=True)
+                    st.dataframe(df_incompletos, use_container_width=True, hide_index=True)
         else:
             st.error(f"Error al leer Cartola: {estado_cartola}")
+    else:
+        st.info("Sube un archivo de cartola bancaria en la sección superior para visualizar los datos.")
 
-with col_res2:
+with tab2:
     if archivo_ventas is not None:
-        st.subheader("3. Registro de Ventas Normalizado")
         df_ventas, estado_ventas = normalizar_ventas(archivo_ventas)
         if estado_ventas == "OK" and df_ventas is not None:
-            total_ventas = df_ventas['monto_total'].sum() if not df_ventas.empty and 'monto_total' in df_ventas.columns else 0
-            st.success(f"¡Ventas procesadas! **{len(df_ventas)}** facturas cargadas.")
-            st.metric("Total Ventas Emitidas", f"$ {total_ventas:,.0f}".replace(",", "."))
+            total_ventas = df_ventas['Monto Total'].sum() if not df_ventas.empty and 'Monto Total' in df_ventas.columns else 0
             
+            col_kpi_v, col_info_v = st.columns([1, 2])
+            with col_kpi_v:
+                st.metric("Total Ventas Emitidas", f"$ {total_ventas:,.0f}".replace(",", "."))
+            with col_info_v:
+                st.success(f"¡Ventas procesadas correctamente! Se cargaron **{len(df_ventas)}** facturas.")
+
+            st.divider()
+
             if not df_ventas.empty:
+                st.markdown("##### 📋 Registro de Ventas Normalizado")
                 st.dataframe(
-                    df_ventas.style.format({'monto_total': '$ {:,.0f}'}), 
+                    df_ventas.style.format({'Monto Total': '$ {:,.0f}'}), 
                     use_container_width=True,
-                    height=380
+                    hide_index=True,
+                    height=450
                 )
         else:
             st.error(f"Error al leer Ventas: {estado_ventas}")
+    else:
+        st.info("Sube un archivo de registro de ventas en la sección superior para visualizar los datos.")
 
