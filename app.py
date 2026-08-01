@@ -34,65 +34,54 @@ def extraer_rut_o_nombre(texto):
 
 
 def normalizar_cartola(archivo_subido):
-    """Lee y estandariza la cartola bancaria asegurando todas las filas."""
+    """Lee y estandariza la cartola bancaria limpiando basura de pie de página."""
     nombre_archivo = archivo_subido.name.lower()
     try:
         registros = []
         if nombre_archivo.endswith('.pdf'):
             with pdfplumber.open(archivo_subido) as pdf:
                 for pagina in pdf.pages:
-                    # Extracto por tablas
                     tablas = pagina.extract_tables()
-                    filas_extraidas = []
-                    
                     for tabla in tablas:
                         for fila in tabla:
-                            if fila:
-                                f_clean = [str(c).strip().replace('\n', ' ') if c else "" for c in fila]
-                                if any(f_clean):
-                                    filas_extraidas.append(" ".join(f_clean))
-                    
-                    # Respaldo: si el extractor de tablas omitió líneas al final, leer el texto directo
-                    texto_pagina = pagina.extract_text()
-                    if texto_pagina:
-                        lineas_texto = texto_pagina.split('\n')
-                        for lin in lineas_texto:
-                            if not any(lin.strip() in f for f in filas_extraidas):
-                                filas_extraidas.append(lin.strip())
-
-                    # Procesar cada línea capturada
-                    for texto_fila in filas_extraidas:
-                        if 'saldo' in texto_fila.lower() or 'cartola' in texto_fila.lower():
-                            continue
-                        
-                        # Buscar fecha
-                        match_fecha = re.search(r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b', texto_fila)
-                        if not match_fecha:
-                            continue
-                        fecha = match_fecha.group(0)
-                        
-                        # Buscar montos relevantes
-                        texto_sin_fecha = texto_fila.replace(fecha, '')
-                        montos_encontrados = re.findall(r'\b\$?\s*(\d{1,3}(?:\.\d{3})+|\d{4,})\b', texto_sin_fecha)
-                        
-                        if montos_encontrados:
-                            values = []
-                            for m in montos_encontrados:
-                                num = int(m.replace('.', '').replace('$', '').strip())
-                                if num > 1000:
-                                    values.append(num)
+                            if not fila:
+                                continue
                             
-                            if values:
-                                monto_pago = values[-1]
+                            f_clean = [str(c).strip().replace('\n', ' ') if c else "" for c in fila]
+                            texto_fila = " ".join(f_clean)
+                            
+                            # Ignorar encabezados, pies de página y saldos
+                            if not any(f_clean) or any(x in texto_fila.lower() for x in ['saldo', 'cartola', 'página', 'hoja', 'rut:']):
+                                continue
+                            
+                            # Debe contener una fecha válida al inicio o dentro de la celda
+                            match_fecha = re.search(r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b', texto_fila)
+                            if not match_fecha:
+                                continue
+                            fecha = match_fecha.group(0)
+                            
+                            # Buscar celdas específicas que contengan un monto (formato chileno)
+                            monto_encontrado = None
+                            for celda in reversed(f_clean):
+                                match_monto = re.search(r'^\$? \s*(\d{1,3}(?:\.\d{3})+)\b', celda) or re.search(r'\b(\d{1,3}(?:\.\d{3})+)\b', celda)
+                                if match_monto:
+                                    val = int(match_monto.group(1).replace('.', ''))
+                                    if val > 1000:
+                                        monto_encontrado = val
+                                        break
+                            
+                            # Filtro estricto: Debe haber un monto real y no solo una fecha o código
+                            if monto_encontrado and ("Traspaso" in texto_fila or "Pago" in texto_fila or "Transferencia" in texto_fila or "$" in texto_fila):
                                 identificador = extraer_rut_o_nombre(texto_fila)
                                 
+                                # Limpiar la glosa de la fecha y del monto
                                 glosa_limpia = texto_fila.replace(fecha, '').strip()
                                 glosa_limpia = re.sub(r'\b\d{1,3}(?:\.\d{3})+\b', '', glosa_limpia).strip()
                                 
                                 registros.append({
                                     'fecha': fecha,
                                     'identificador_cliente': identificador,
-                                    'monto_pago': monto_pago,
+                                    'monto_pago': monto_encontrado,
                                     'descripcion_glosa': glosa_limpia[:120]
                                 })
 
@@ -204,54 +193,50 @@ st.write(f"Gestionando información para: **{empresa}** | Período: **{periodo.s
 st.divider()
 
 st.subheader("1. Carga de Documentos Crudos")
-col_cartola, col_ventas = st.columns(2)
 
-with col_cartola:
-    st.markdown("##### 🏛️ Cartola Bancaria (Ingresos)")
-    archivo_cartola = st.file_uploader(
-        "Sube la cartola descargada del banco",
-        type=["pdf", "xlsx", "xls", "csv"],
-        key="cartola_input"
-    )
+# Ajuste de layout general
+archivo_cartola = st.file_uploader(
+    "🏛️ Sube la cartola bancaria descargada del banco (PDF / Excel)",
+    type=["pdf", "xlsx", "xls", "csv"],
+    key="cartola_input"
+)
 
-with col_ventas:
-    st.markdown("##### 📄 Registro de Ventas (Facturación)")
-    archivo_ventas = st.file_uploader(
-        "Sube el archivo de ventas emitidas",
-        type=["xlsx", "xls", "csv"],
-        key="ventas_input"
-    )
+archivo_ventas = st.file_uploader(
+    "📄 Sube el registro de ventas emitidas (Excel / CSV)",
+    type=["xlsx", "xls", "csv"],
+    key="ventas_input"
+)
 
 st.divider()
 
-col_res_cartola, col_res_ventas = st.columns(2)
+if archivo_cartola is not None:
+    st.subheader("2. Cartola Bancaria Normalizada")
+    df_cartola, msg = normalizar_cartola(archivo_cartola)
+    if df_cartola is not None and not df_cartola.empty:
+        st.success(f"¡Cartola procesada correctamente! **{len(df_cartola)}** abonos reales detectados.")
+        st.metric("Total Ingresos", f"$ {df_cartola['monto_pago'].sum():,.0f}".replace(",", "."))
+        
+        # Muestra la tabla a todo el ancho disponible
+        st.dataframe(
+            df_cartola.style.format({'monto_pago': '$ {:,.0f}'}), 
+            use_container_width=True,
+            height=450
+        )
+    else:
+        st.error(f"Cartola: {msg}")
 
-with col_res_cartola:
-    if archivo_cartola is not None:
-        st.subheader("2. Cartola Bancaria Normalizada")
-        df_cartola, msg = normalizar_cartola(archivo_cartola)
-        if df_cartola is not None and not df_cartola.empty:
-            st.success(f"¡Cartola lista! **{len(df_cartola)}** abonos detectados.")
-            st.metric("Total Ingresos", f"$ {df_cartola['monto_pago'].sum():,.0f}".replace(",", "."))
-            st.dataframe(
-                df_cartola.style.format({'monto_pago': '$ {:,.0f}'}), 
-                use_container_width=True,
-                height=550
-            )
-        else:
-            st.error(f"Cartola: {msg}")
+if archivo_ventas is not None:
+    st.subheader("3. Registro de Ventas Normalizado")
+    df_ventas, msg_v = normalizar_ventas(archivo_ventas)
+    if df_ventas is not None and not df_ventas.empty:
+        st.success(f"¡Ventas listas! **{len(df_ventas)}** facturas cargadas.")
+        st.metric("Total Ventas Emitidas", f"$ {df_ventas['monto_total'].sum():,.0f}".replace(",", "."))
+        
+        st.dataframe(
+            df_ventas.style.format({'monto_total': '$ {:,.0f}'}), 
+            use_container_width=True,
+            height=450
+        )
+    else:
+        st.error(f"Ventas: {msg_v}")
 
-with col_res_ventas:
-    if archivo_ventas is not None:
-        st.subheader("3. Registro de Ventas Normalizado")
-        df_ventas, msg_v = normalizar_ventas(archivo_ventas)
-        if df_ventas is not None and not df_ventas.empty:
-            st.success(f"¡Ventas listas! **{len(df_ventas)}** facturas cargadas.")
-            st.metric("Total Ventas Emitidas", f"$ {df_ventas['monto_total'].sum():,.0f}".replace(",", "."))
-            st.dataframe(
-                df_ventas.style.format({'monto_total': '$ {:,.0f}'}), 
-                use_container_width=True,
-                height=550
-            )
-        else:
-            st.error(f"Ventas: {msg_v}")
