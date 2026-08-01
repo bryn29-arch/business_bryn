@@ -5,6 +5,62 @@ import re
 import pdfplumber
 
 # ---------------------------------------------------------
+# CONFIGURACIÓN DE PÁGINA Y CSS ENTERPRISE
+# ---------------------------------------------------------
+st.set_page_config(
+    page_title="FinanSmart | Plataforma de Conciliación",
+    page_icon="💼",
+    layout="wide"
+)
+
+# Estilos CSS personalizados para "Enterprise Look"
+st.markdown("""
+    <style>
+    .stApp {
+        background-color: #f8f9fa;
+    }
+    
+    div[data-testid="stFileUploader"] {
+        background-color: #ffffff;
+        border: 2px dashed #4b6bfb;
+        border-radius: 12px;
+        padding: 15px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+        transition: all 0.3s ease-in-out;
+    }
+    
+    div[data-testid="stFileUploader"]:hover {
+        border-color: #1d3557;
+        box-shadow: 0 6px 16px rgba(75, 107, 251, 0.15);
+        transform: translateY(-2px);
+    }
+    
+    div[data-testid="stFileUploader"] button {
+        background-color: #4b6bfb !important;
+        color: white !important;
+        border-radius: 8px !important;
+        border: none !important;
+        font-weight: 600 !important;
+        padding: 8px 16px !important;
+        box-shadow: 0 2px 6px rgba(75, 107, 251, 0.3);
+    }
+    
+    div[data-testid="stFileUploader"] button:hover {
+        background-color: #3b52d4 !important;
+    }
+    
+    div[data-testid="stMetric"] {
+        background-color: #ffffff;
+        padding: 15px;
+        border-radius: 10px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+        border-left: 5px solid #4b6bfb;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------
 # 1. FUNCIONES MOTORAS DE PROCESAMIENTO (BACK-END)
 # ---------------------------------------------------------
 
@@ -13,7 +69,6 @@ def extraer_rut_o_nombre(texto):
     if not isinstance(texto, str):
         return "NO_DETECTADO"
     
-    # Buscar RUT explícito
     patron_rut = r'\b(\d{1,2}(?:\.?\d{3}){2}-?[\dkK])\b'
     match = re.search(patron_rut, texto)
     if match:
@@ -23,7 +78,6 @@ def extraer_rut_o_nombre(texto):
             rut_limpio = rut_limpio[:-1] + '-' + rut_limpio[-1]
         return rut_limpio
     
-    # Extraer nombre si es traspaso BCI
     match_nombre = re.search(r'(?:Traspaso De:|Pago:)\s*([A-Za-z0-9\s]+)', texto, re.IGNORECASE)
     if match_nombre:
         nombre = match_nombre.group(1).strip()
@@ -52,7 +106,6 @@ def normalizar_cartola(archivo_subido):
                             f_clean = [str(c).strip().replace('\n', ' ') if c else "" for c in fila]
                             texto_fila = " ".join(f_clean)
                             
-                            # Omitir encabezados explícitos o saldos totales
                             if not any(f_clean) or any(x in texto_fila.lower() for x in ['saldo inicial', 'saldo final', 'cartola de cuenta']):
                                 continue
                             
@@ -61,7 +114,6 @@ def normalizar_cartola(archivo_subido):
                                 continue
                             fecha = match_fecha.group(0)
                             
-                            # Extraer montos
                             monto_encontrado = None
                             for celda in reversed(f_clean):
                                 match_monto = re.search(r'^\$? \s*(\d{1,3}(?:\.\d{3})+)\b', celda) or re.search(r'\b(\d{1,3}(?:\.\d{3})+)\b', celda)
@@ -75,13 +127,12 @@ def normalizar_cartola(archivo_subido):
                             glosa_limpia = texto_fila.replace(fecha, '').strip()
                             glosa_limpia = re.sub(r'\b\d{1,3}(?:\.\d{3})+\b', '', glosa_limpia).strip()
 
-                            # SI la fila tiene fecha pero le falta un monto claro o está recortada -> Alerta de Dudosa
                             if not monto_encontrado or ("Traspaso" in texto_fila and identificador == "NO_DETECTADO"):
                                 registros_dudosos.append({
-                                    'pagina': num_pag,
-                                    'fecha': fecha,
-                                    'contenido_capturado': texto_fila[:100],
-                                    'observacion': 'Monto o Identificador incompleto/ilegible'
+                                    'Página': num_pag,
+                                    'Fecha': fecha,
+                                    'Glosa Capturada': texto_fila[:100],
+                                    'Observación': 'Monto o cliente requiere validación manual'
                                 })
                             else:
                                 registros_ok.append({
@@ -106,6 +157,9 @@ def normalizar_cartola(archivo_subido):
 
         df_ok = pd.DataFrame(registros_ok).drop_duplicates().reset_index(drop=True) if registros_ok else pd.DataFrame()
         df_dudosos = pd.DataFrame(registros_dudosos).drop_duplicates().reset_index(drop=True) if registros_dudosos else pd.DataFrame()
+
+        if df_ok.empty and df_dudosos.empty:
+            return None, None, "No se identificaron movimientos en el archivo."
 
         return df_ok, df_dudosos, "OK"
 
@@ -178,76 +232,78 @@ def normalizar_ventas(archivo_subido):
 # 2. INTERFAZ GRÁFICA DE USUARIO (FRONT-END)
 # ---------------------------------------------------------
 
-st.set_page_config(
-    page_title="FinanSmart | Plataforma de Conciliación",
-    page_icon="💼",
-    layout="wide"
-)
-
 with st.sidebar:
     st.title("💼 FinanSmart")
     st.caption("Plataforma Inteligente de Gestión Financiera")
     st.divider()
-    empresa = st.text_input("Nombre de la Empresa / Cliente", value="PyME Ejemplo SpA")
+    empresa = st.text_input("Empresa / Cliente", value="PyME Ejemplo SpA")
     periodo = st.date_input("Mes de Conciliación", value=pd.to_datetime("2026-08-01"))
     st.divider()
-    st.info("💡 **Tip para el cliente:** Sube tu cartola original y registro de ventas sin hacerles cambios.")
+    st.info("💡 **Automatización:** Sube la cartola bancaria y el registro de ventas para conciliar de forma automática.")
 
 st.title("📊 Panel de Conciliación y Control de Cuentas")
-st.write(f"Gestionando información para: **{empresa}** | Período: **{periodo.strftime('%m/%Y')}**")
+st.markdown(f"**Cliente:** `{empresa}` | **Período:** `{periodo.strftime('%m/%Y')}`")
 st.divider()
 
-st.subheader("1. Carga de Documentos Crudos")
+st.subheader("1. Carga de Documentos Fuente")
 
-archivo_cartola = st.file_uploader(
-    "🏛️ Sube la cartola bancaria descargada del banco (PDF / Excel)",
-    type=["pdf", "xlsx", "xls", "csv"],
-    key="cartola_input"
-)
+col_cartola, col_ventas = st.columns(2)
 
-archivo_ventas = st.file_uploader(
-    "📄 Sube el registro de ventas emitidas (Excel / CSV)",
-    type=["xlsx", "xls", "csv"],
-    key="ventas_input"
-)
+with col_cartola:
+    st.markdown("##### 🏛️ Cartola Bancaria (Ingresos)")
+    archivo_cartola = st.file_uploader(
+        "Arrastra o selecciona el PDF / Excel del banco",
+        type=["pdf", "xlsx", "xls", "csv"],
+        key="cartola_input"
+    )
+
+with col_ventas:
+    st.markdown("##### 📄 Registro de Ventas (SII / ERP)")
+    archivo_ventas = st.file_uploader(
+        "Arrastra o selecciona el Excel de ventas emitidas",
+        type=["xlsx", "xls", "csv"],
+        key="ventas_input"
+    )
 
 st.divider()
 
-if archivo_cartola is not None:
-    st.subheader("2. Cartola Bancaria Normalizada")
-    df_cartola, df_incompletos, msg = normalizar_cartola(archivo_cartola)
-    
-    if df_cartola is not None and not df_cartola.empty:
-        st.success(f"¡Cartola procesada! **{len(df_cartola)}** abonos completos identificados.")
-        st.metric("Total Ingresos Confirmados", f"$ {df_cartola['monto_pago'].sum():,.0f}".replace(",", "."))
+col_res1, col_res2 = st.columns(2)
+
+with col_res1:
+    if archivo_cartola is not None:
+        st.subheader("2. Cartola Bancaria Normalizada")
+        df_cartola, df_incompletos, estado_cartola = normalizar_cartola(archivo_cartola)
         
-        st.dataframe(
-            df_cartola.style.format({'monto_pago': '$ {:,.0f}'}), 
-            use_container_width=True,
-            height=400
-        )
+        if estado_cartola == "OK" and df_cartola is not None:
+            st.success(f"¡Cartola procesada! **{len(df_cartola)}** abonos listos.")
+            st.metric("Total Ingresos Confirmados", f"$ {df_cartola['monto_pago'].sum():,.0f}".replace(",", "."))
+            
+            st.dataframe(
+                df_cartola.style.format({'monto_pago': '$ {:,.0f}'}), 
+                use_container_width=True,
+                height=380
+            )
 
-        # MOSTRAR ALERTA Y TABLA DE REVISIÓN MANUAL SI HAY FILAS INCOMPLETAS
-        if df_incompletos is not None and not df_incompletos.empty:
-            st.warning(f"⚠️ **ATENCIÓN:** Se han detectado **{len(df_incompletos)}** fila(s) incompleta(s) o recortada(s) en la cartola que requieren revisión manual.")
-            with st.expander("🔍 Ver filas incompletas / pendientes de revisión", expanded=True):
-                st.write("Revisa estas líneas directamente en tu PDF original:")
-                st.dataframe(df_incompletos, use_container_width=True)
+            if df_incompletos is not None and not df_incompletos.empty:
+                st.warning(f"⚠️ **Atención:** Se detectaron **{len(df_incompletos)}** fila(s) con posible omisión o requiere revisión manual.")
+                with st.expander("🔍 Ver transacciones pendientes de revisión", expanded=False):
+                    st.dataframe(df_incompletos, use_container_width=True)
+        else:
+            st.error(f"Error al leer Cartola: {estado_cartola}")
 
-    else:
-        st.error(f"Cartola: {msg}")
+with col_res2:
+    if archivo_ventas is not None:
+        st.subheader("3. Registro de Ventas Normalizado")
+        df_ventas, estado_ventas = normalizar_ventas(archivo_ventas)
+        if estado_ventas == "OK" and df_ventas is not None:
+            st.success(f"¡Ventas procesadas! **{len(df_ventas)}** facturas cargadas.")
+            st.metric("Total Ventas Emitidas", f"$ {df_ventas['monto_total'].sum():,.0f}".replace(",", "."))
+            
+            st.dataframe(
+                df_ventas.style.format({'monto_total': '$ {:,.0f}'}), 
+                use_container_width=True,
+                height=380
+            )
+        else:
+            st.error(f"Error al leer Ventas: {estado_ventas}")
 
-if archivo_ventas is not None:
-    st.subheader("3. Registro de Ventas Normalizado")
-    df_ventas, msg_v = normalizar_ventas(archivo_ventas)
-    if df_ventas is not None and not df_ventas.empty:
-        st.success(f"¡Ventas listas! **{len(df_ventas)}** facturas cargadas.")
-        st.metric("Total Ventas Emitidas", f"$ {df_ventas['monto_total'].sum():,.0f}".replace(",", "."))
-        
-        st.dataframe(
-            df_ventas.style.format({'monto_total': '$ {:,.0f}'}), 
-            use_container_width=True,
-            height=400
-        )
-    else:
-        st.error(f"Ventas: {msg_v}")
