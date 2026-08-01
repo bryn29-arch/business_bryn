@@ -34,13 +34,15 @@ def extraer_rut_o_nombre(texto):
 
 
 def normalizar_cartola(archivo_subido):
-    """Lee y estandariza la cartola bancaria limpiando basura de pie de página."""
+    """Lee la cartola y clasifica transacciones procesadas vs. filas incompletas/dudosas."""
     nombre_archivo = archivo_subido.name.lower()
     try:
-        registros = []
+        registros_ok = []
+        registros_dudosos = []
+
         if nombre_archivo.endswith('.pdf'):
             with pdfplumber.open(archivo_subido) as pdf:
-                for pagina in pdf.pages:
+                for num_pag, pagina in enumerate(pdf.pages, start=1):
                     tablas = pagina.extract_tables()
                     for tabla in tablas:
                         for fila in tabla:
@@ -50,17 +52,16 @@ def normalizar_cartola(archivo_subido):
                             f_clean = [str(c).strip().replace('\n', ' ') if c else "" for c in fila]
                             texto_fila = " ".join(f_clean)
                             
-                            # Ignorar encabezados, pies de página y saldos
-                            if not any(f_clean) or any(x in texto_fila.lower() for x in ['saldo', 'cartola', 'página', 'hoja', 'rut:']):
+                            # Omitir encabezados explícitos o saldos totales
+                            if not any(f_clean) or any(x in texto_fila.lower() for x in ['saldo inicial', 'saldo final', 'cartola de cuenta']):
                                 continue
                             
-                            # Debe contener una fecha válida al inicio o dentro de la celda
                             match_fecha = re.search(r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b', texto_fila)
                             if not match_fecha:
                                 continue
                             fecha = match_fecha.group(0)
                             
-                            # Buscar celdas específicas que contengan un monto (formato chileno)
+                            # Extraer montos
                             monto_encontrado = None
                             for celda in reversed(f_clean):
                                 match_monto = re.search(r'^\$? \s*(\d{1,3}(?:\.\d{3})+)\b', celda) or re.search(r'\b(\d{1,3}(?:\.\d{3})+)\b', celda)
@@ -70,15 +71,20 @@ def normalizar_cartola(archivo_subido):
                                         monto_encontrado = val
                                         break
                             
-                            # Filtro estricto: Debe haber un monto real y no solo una fecha o código
-                            if monto_encontrado and ("Traspaso" in texto_fila or "Pago" in texto_fila or "Transferencia" in texto_fila or "$" in texto_fila):
-                                identificador = extraer_rut_o_nombre(texto_fila)
-                                
-                                # Limpiar la glosa de la fecha y del monto
-                                glosa_limpia = texto_fila.replace(fecha, '').strip()
-                                glosa_limpia = re.sub(r'\b\d{1,3}(?:\.\d{3})+\b', '', glosa_limpia).strip()
-                                
-                                registros.append({
+                            identificador = extraer_rut_o_nombre(texto_fila)
+                            glosa_limpia = texto_fila.replace(fecha, '').strip()
+                            glosa_limpia = re.sub(r'\b\d{1,3}(?:\.\d{3})+\b', '', glosa_limpia).strip()
+
+                            # SI la fila tiene fecha pero le falta un monto claro o está recortada -> Alerta de Dudosa
+                            if not monto_encontrado or ("Traspaso" in texto_fila and identificador == "NO_DETECTADO"):
+                                registros_dudosos.append({
+                                    'pagina': num_pag,
+                                    'fecha': fecha,
+                                    'contenido_capturado': texto_fila[:100],
+                                    'observacion': 'Monto o Identificador incompleto/ilegible'
+                                })
+                            else:
+                                registros_ok.append({
                                     'fecha': fecha,
                                     'identificador_cliente': identificador,
                                     'monto_pago': monto_encontrado,
@@ -91,21 +97,20 @@ def normalizar_cartola(archivo_subido):
                 texto_fila = " ".join([str(v) for v in row.values if pd.notna(v)])
                 montos = re.findall(r'\b\d{3,}\b', texto_fila)
                 if montos:
-                    registros.append({
+                    registros_ok.append({
                         'fecha': 'VER_EXCEL',
                         'identificador_cliente': extraer_rut_o_nombre(texto_fila),
                         'monto_pago': int(montos[-1]),
                         'descripcion_glosa': texto_fila[:100]
                     })
 
-        if not registros:
-            return None, "No se identificaron montos procesables."
+        df_ok = pd.DataFrame(registros_ok).drop_duplicates().reset_index(drop=True) if registros_ok else pd.DataFrame()
+        df_dudosos = pd.DataFrame(registros_dudosos).drop_duplicates().reset_index(drop=True) if registros_dudosos else pd.DataFrame()
 
-        df_final = pd.DataFrame(registros).drop_duplicates().reset_index(drop=True)
-        return df_final, "OK"
+        return df_ok, df_dudosos, "OK"
 
     except Exception as e:
-        return None, f"Error al procesar: {str(e)}"
+        return None, None, f"Error al procesar: {str(e)}"
 
 
 def normalizar_ventas(archivo_subido):
@@ -194,7 +199,6 @@ st.divider()
 
 st.subheader("1. Carga de Documentos Crudos")
 
-# Ajuste de layout general
 archivo_cartola = st.file_uploader(
     "🏛️ Sube la cartola bancaria descargada del banco (PDF / Excel)",
     type=["pdf", "xlsx", "xls", "csv"],
@@ -211,17 +215,25 @@ st.divider()
 
 if archivo_cartola is not None:
     st.subheader("2. Cartola Bancaria Normalizada")
-    df_cartola, msg = normalizar_cartola(archivo_cartola)
+    df_cartola, df_incompletos, msg = normalizar_cartola(archivo_cartola)
+    
     if df_cartola is not None and not df_cartola.empty:
-        st.success(f"¡Cartola procesada correctamente! **{len(df_cartola)}** abonos reales detectados.")
-        st.metric("Total Ingresos", f"$ {df_cartola['monto_pago'].sum():,.0f}".replace(",", "."))
+        st.success(f"¡Cartola procesada! **{len(df_cartola)}** abonos completos identificados.")
+        st.metric("Total Ingresos Confirmados", f"$ {df_cartola['monto_pago'].sum():,.0f}".replace(",", "."))
         
-        # Muestra la tabla a todo el ancho disponible
         st.dataframe(
             df_cartola.style.format({'monto_pago': '$ {:,.0f}'}), 
             use_container_width=True,
-            height=450
+            height=400
         )
+
+        # MOSTRAR ALERTA Y TABLA DE REVISIÓN MANUAL SI HAY FILAS INCOMPLETAS
+        if df_incompletos is not None and not df_incompletos.empty:
+            st.warning(f"⚠️ **ATENCIÓN:** Se han detectado **{len(df_incompletos)}** fila(s) incompleta(s) o recortada(s) en la cartola que requieren revisión manual.")
+            with st.expander("🔍 Ver filas incompletas / pendientes de revisión", expanded=True):
+                st.write("Revisa estas líneas directamente en tu PDF original:")
+                st.dataframe(df_incompletos, use_container_width=True)
+
     else:
         st.error(f"Cartola: {msg}")
 
@@ -235,8 +247,7 @@ if archivo_ventas is not None:
         st.dataframe(
             df_ventas.style.format({'monto_total': '$ {:,.0f}'}), 
             use_container_width=True,
-            height=450
+            height=400
         )
     else:
         st.error(f"Ventas: {msg_v}")
-
