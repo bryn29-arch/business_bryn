@@ -13,16 +13,13 @@ st.set_page_config(
     layout="wide"
 )
 
-# Estilos CSS Luxury & Executive Look
 st.markdown("""
     <style>
-    /* Fondo principal */
     .stApp {
         background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
     }
     
-    /* Contenedor del Cargador de Archivos */
     div[data-testid="stFileUploader"] {
         background: #ffffff;
         border: 1.5px solid #e2e8f0;
@@ -37,7 +34,6 @@ st.markdown("""
         box-shadow: 0 15px 30px -10px rgba(99, 102, 241, 0.15);
     }
     
-    /* Botones Lujosos */
     div[data-testid="stFileUploader"] button, .stButton > button {
         background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%) !important;
         color: #ffffff !important;
@@ -49,7 +45,6 @@ st.markdown("""
         box-shadow: 0 4px 14px 0 rgba(15, 23, 42, 0.35) !important;
     }
     
-    /* Tarjetas Métricas Lujosas */
     div[data-testid="stMetric"] {
         background: linear-gradient(145deg, #ffffff 0%, #f8fafc 100%);
         padding: 20px;
@@ -73,7 +68,6 @@ st.markdown("""
         font-size: 2rem;
     }
 
-    /* Pestañas estilizadas */
     .stTabs [data-baseweb="tab-list"] {
         gap: 12px;
     }
@@ -95,34 +89,65 @@ st.markdown("""
 
 
 # ---------------------------------------------------------
-# 1. FUNCIONES MOTORAS DE PROCESAMIENTO (BACK-END)
+# 1. FUNCIONES MOTORAS DE PROCESAMIENTO (MEJORADAS)
 # ---------------------------------------------------------
 
 def extraer_rut_o_nombre(texto):
-    """Busca RUT chileno o extrae el nombre de la persona/empresa en la glosa."""
+    """Detecta RUTs con o sin formato (ej. 0969023903, 96.902.390-3) o razos sociales."""
     if not isinstance(texto, str):
         return "NO_DETECTADO"
     
-    patron_rut = r'\b(\d{1,2}(?:\.?\d{3}){2}-?[\dkK])\b'
-    match = re.search(patron_rut, texto)
-    if match:
-        rut_raw = match.group(0)
-        rut_limpio = rut_raw.replace('.', '').upper()
-        if '-' not in rut_limpio:
-            rut_limpio = rut_limpio[:-1] + '-' + rut_limpio[-1]
-        return rut_limpio
-    
-    match_nombre = re.search(r'(?:Traspaso De:|Pago:)\s*([A-Za-z0-9\s]+)', texto, re.IGNORECASE)
+    # 1. Buscar RUT estándar con guión
+    match_std = re.search(r'\b(\d{1,2}(?:\.?\d{3}){2}-?[\dkK])\b', texto)
+    if match_std:
+        rut_raw = match_std.group(0).replace('.', '').upper()
+        if '-' not in rut_raw:
+            rut_raw = rut_raw[:-1] + '-' + rut_raw[-1]
+        return rut_raw
+
+    # 2. Buscar RUT continuo de 8 o 9 dígitos (ej: 0969023903 -> 96902390-3)
+    match_continuo = re.search(r'\b0?(\d{7,8}[\dkK])\b', texto)
+    if match_continuo:
+        raw = match_continuo.group(1).upper()
+        return f"{raw[:-1]}-{raw[-1]}"
+
+    # 3. Buscar Nombre / Razón social si existe patrón explícito
+    match_nombre = re.search(r'(?:Traspaso De:|Pago:|Workmate|Proveedores)\s*([A-Za-z0-9\s]+)', texto, re.IGNORECASE)
     if match_nombre:
-        nombre = match_nombre.group(1).strip()
-        nombre = re.sub(r'\s+(Internet|Cta|Cuenta|Transferencia).*$', '', nombre, flags=re.IGNORECASE)
-        return f"NOMBRE: {nombre[:35]}"
+        nombre = match_nombre.group(0).strip()
+        nombre = re.sub(r'\s+(Internet|Cta|Cuenta|Transferencia|Oficina).*$', '', nombre, flags=re.IGNORECASE)
+        return nombre[:35]
         
     return "NO_DETECTADO"
 
 
+def extraer_monto_chileno(texto_o_celda):
+    """Extrae montos numéricos con formato de miles por punto (.) o por coma (,)."""
+    if not isinstance(texto_o_celda, str):
+        texto_o_celda = str(texto_o_celda)
+    
+    # Busca patrones tipo: 3,998,400 o 3.998.400 o 47,600
+    coincidencias = re.findall(r'\b\d{1,3}(?:[.,]\d{3})+\b', texto_o_celda)
+    if coincidencias:
+        # Tomamos el último monto que suele corresponder al abono o valor final
+        monto_str = coincidencias[-1].replace('.', '').replace(',', '')
+        try:
+            val = int(monto_str)
+            if val > 500: # Ignorar montos insignificantes o códigos
+                return val
+        except ValueError:
+            pass
+            
+    # Búsqueda secundaria de enteros simples
+    enteros = re.findall(r'\b\d{4,9}\b', texto_o_celda)
+    if enteros:
+        return int(enteros[-1])
+        
+    return None
+
+
 def normalizar_cartola(archivo_subido):
-    """Lee la cartola y clasifica transacciones procesadas vs. filas incompletas/dudosas."""
+    """Lee la cartola en PDF/Excel y procesa montos y clientes sin enviarlos a dudosos por formato."""
     nombre_archivo = archivo_subido.name.lower()
     try:
         registros_ok = []
@@ -143,49 +168,49 @@ def normalizar_cartola(archivo_subido):
                             if not any(f_clean) or any(x in texto_fila.lower() for x in ['saldo inicial', 'saldo final', 'cartola de cuenta']):
                                 continue
                             
-                            match_fecha = re.search(r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b', texto_fila)
-                            if not match_fecha:
-                                continue
-                            fecha = match_fecha.group(0)
-                            
+                            # Extraer Monto
                             monto_encontrado = None
                             for celda in reversed(f_clean):
-                                match_monto = re.search(r'^\$? \s*(\d{1,3}(?:\.\d{3})+)\b', celda) or re.search(r'\b(\d{1,3}(?:\.\d{3})+)\b', celda)
-                                if match_monto:
-                                    val = int(match_monto.group(1).replace('.', ''))
-                                    if val > 1000:
-                                        monto_encontrado = val
-                                        break
+                                m = extraer_monto_chileno(celda)
+                                if m:
+                                    monto_encontrado = m
+                                    break
+                            
+                            if not monto_encontrado:
+                                monto_encontrado = extraer_monto_chileno(texto_fila)
+
+                            # Extraer Fecha
+                            match_fecha = re.search(r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b', texto_fila)
+                            fecha = match_fecha.group(0) if match_fecha else "S/F"
                             
                             identificador = extraer_rut_o_nombre(texto_fila)
-                            glosa_limpia = texto_fila.replace(fecha, '').strip()
-                            glosa_limpia = re.sub(r'\b\d{1,3}(?:\.\d{3})+\b', '', glosa_limpia).strip()
+                            glosa_limpia = re.sub(r'\b\d{1,3}(?:[.,]\d{3})+\b', '', texto_fila).strip()
 
-                            if not monto_encontrado or ("Traspaso" in texto_fila and identificador == "NO_DETECTADO"):
-                                registros_dudosos.append({
-                                    'Página': num_pag,
-                                    'Fecha': fecha,
-                                    'Glosa Capturada': texto_fila[:100],
-                                    'Observación': 'Monto o cliente requiere validación manual'
-                                })
-                            else:
+                            if monto_encontrado:
                                 registros_ok.append({
                                     'Fecha': fecha,
                                     'Identificador / Cliente': identificador,
                                     'Monto Pago': monto_encontrado,
                                     'Descripción Glosa': glosa_limpia[:120]
                                 })
+                            else:
+                                registros_dudosos.append({
+                                    'Página': num_pag,
+                                    'Fecha': fecha,
+                                    'Glosa Capturada': texto_fila[:100],
+                                    'Observación': 'No se detectó un monto numérico válido'
+                                })
 
         elif nombre_archivo.endswith(('.xlsx', '.xls', '.csv')):
             df_raw = pd.read_excel(archivo_subido) if nombre_archivo.endswith(('.xlsx', '.xls')) else pd.read_csv(archivo_subido)
             for idx, row in df_raw.iterrows():
                 texto_fila = " ".join([str(v) for v in row.values if pd.notna(v)])
-                montos = re.findall(r'\b\d{3,}\b', texto_fila)
-                if montos:
+                m = extraer_monto_chileno(texto_fila)
+                if m:
                     registros_ok.append({
                         'Fecha': 'VER_EXCEL',
                         'Identificador / Cliente': extraer_rut_o_nombre(texto_fila),
-                        'Monto Pago': int(montos[-1]),
+                        'Monto Pago': m,
                         'Descripción Glosa': texto_fila[:100]
                     })
 
@@ -305,7 +330,6 @@ with col_ventas:
 
 st.divider()
 
-# Usar pestañas anchas para maximizar el área de lectura
 tab1, tab2 = st.tabs(["🏛️ Cartola Bancaria Normalizada", "📄 Registro de Ventas Normalizado"])
 
 with tab1:
@@ -334,7 +358,7 @@ with tab1:
 
             if df_incompletos is not None and not df_incompletos.empty:
                 st.warning(f"⚠️ **Atención:** Se detectaron **{len(df_incompletos)}** fila(s) pendientes o que requieren revisión manual.")
-                with st.expander("🔍 Ver transacciones para revisión manual", expanded=True):
+                with st.expander("🔍 Ver transacciones para revisión manual", expanded=False):
                     st.dataframe(df_incompletos, use_container_width=True, hide_index=True)
         else:
             st.error(f"Error al leer Cartola: {estado_cartola}")
@@ -367,4 +391,3 @@ with tab2:
             st.error(f"Error al leer Ventas: {estado_ventas}")
     else:
         st.info("Sube un archivo de registro de ventas en la sección superior para visualizar los datos.")
-
