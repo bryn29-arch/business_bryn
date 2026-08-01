@@ -25,35 +25,41 @@ def extraer_rut_de_texto(texto):
     return "NO_DETECTADO"
 
 
-def procesar_cartola_pdf(archivo_pdf):
-    """Extrae texto y tablas de un archivo PDF bancario."""
-    filas_extraidas = []
-    
+def extraer_filas_pdf(archivo_pdf):
+    """Extrae líneas de texto y celdas estructuradas de cualquier PDF bancario."""
+    filas = []
     with pdfplumber.open(archivo_pdf) as pdf:
         for pagina in pdf.pages:
+            # Intento 1: Extraer como tabla estructurada
             tablas = pagina.extract_tables()
             for tabla in tablas:
-                for fila in tabla:
-                    # Limpiar elementos nulos de la fila
-                    fila_limpia = [str(cell).strip() if cell else "" for cell in fila]
-                    if any(fila_limpia):
-                        filas_extraidas.append(fila_limpia)
-                        
-    if not filas_extraidas:
-        return pd.DataFrame()
-        
-    df_raw = pd.DataFrame(filas_extraidas)
-    return df_raw
+                for f in tabla:
+                    if f:
+                        f_clean = [str(c).strip() if c is not None else "" for c in f]
+                        if any(f_clean):
+                            filas.append(f_clean)
+            
+            # Intento 2: Si no detectó tablas, extraer línea por línea de texto
+            if not filas:
+                texto = pagina.extract_text()
+                if texto:
+                    for linea in texto.split('\n'):
+                        partes = linea.split()
+                        if len(partes) >= 2:
+                            filas.append(partes)
+    return filas
 
 
 def normalizar_cartola(archivo_subido):
-    """Lee el archivo (PDF, Excel o CSV) y devuelve una tabla estandarizada."""
+    """Lee el archivo (PDF, Excel o CSV) y devuelve una tabla estandarizada con abonos."""
     nombre_archivo = archivo_subido.name.lower()
     
     try:
-        # Carga según el formato del archivo
         if nombre_archivo.endswith('.pdf'):
-            df_raw = procesar_cartola_pdf(archivo_subido)
+            filas_raw = extraer_filas_pdf(archivo_subido)
+            if not filas_raw:
+                return None, "El PDF no contiene texto legible ni tablas."
+            df_raw = pd.DataFrame(filas_raw)
         elif nombre_archivo.endswith(('.xlsx', '.xls')):
             df_raw = pd.read_excel(archivo_subido)
         elif nombre_archivo.endswith('.csv'):
@@ -62,59 +68,54 @@ def normalizar_cartola(archivo_subido):
             return None, "Formato no soportado."
 
         if df_raw.empty:
-            return None, "No se pudieron extraer datos del archivo."
+            return None, "El archivo no contiene filas procesables."
 
-        # Identificar columnas por sinónimos
-        mapa_cols = {
-            'fecha': ['fecha', 'fec', 'fecha mov', 'f. proceso'],
-            'glosa': ['glosa', 'concepto', 'detalle', 'descripcion', 'descripción', 'observaciones'],
-            'abono': ['abono', 'abonos', 'credito', 'crédito', 'monto_abono', 'deposito', 'depósito', 'monto']
-        }
-
-        col_map = {}
-        for col_std, sinonimos in mapa_cols.items():
-            for c in df_raw.columns:
-                if str(c).lower().strip() in sinonimos:
-                    col_map[c] = col_std
-                    break
+        registros = []
         
-        df = df_raw.rename(columns=col_map)
+        for idx, row in df_raw.iterrows():
+            texto_fila = " ".join([str(val) for val in row.values if pd.notna(val) and str(val).strip() != ""])
+            
+            # Omitir encabezados conocidos
+            if any(palabra in texto_fila.lower() for palabra in ['saldo final', 'cartola de cuentas', 'saldo inicial', 'movimiento']):
+                if not any(char.isdigit() for char in texto_fila):
+                    continue
 
-        # Si no mapeó automáticamente por encabezados, asignamos por posición como respaldo
-        if 'abono' not in df.columns:
-            # Buscar la primera columna que contenga números/montos
-            for col in df.columns:
-                serie_num = df[col].astype(str).str.replace(r'[^\d]', '', regex=True)
-                if pd.to_numeric(serie_num, errors='coerce').sum() > 0:
-                    df = df.rename(columns={col: 'abono'})
-                    break
+            # Buscar montos numéricos en la fila
+            montos = re.findall(r'\b\$?\s*(\d{1,3}(?:\.\d{3})+|\d+)(?:,\d{2})?\b', texto_fila)
+            
+            if montos:
+                montos_num = []
+                for m in montos:
+                    val = int(m.replace('.', '').replace('$', '').strip())
+                    if val > 0:
+                        montos_num.append(val)
+                
+                if montos_num:
+                    monto_final = montos_num[-1] if len(montos_num) == 1 else montos_num[0]
+                    
+                    match_fecha = re.search(r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b', texto_fila)
+                    fecha = match_fecha.group(0) if match_fecha else "S/F"
+                    
+                    rut = extraer_rut_de_texto(texto_fila)
+                    
+                    if monto_final > 0:
+                        registros.append({
+                            'fecha': fecha,
+                            'rut_detectado': rut,
+                            'monto_pago': monto_final,
+                            'descripcion_glosa': texto_fila[:120]
+                        })
 
-        if 'glosa' not in df.columns:
-            # Asignar la columna con texto más largo como glosa
-            df['glosa'] = df.apply(lambda x: " ".join(x.dropna().astype(str)), axis=1)
+        if not registros:
+            return None, "No se identificaron montos de abono numéricos en el documento."
 
-        # Limpieza de montos de abono
-        df['monto_pago'] = (
-            df['abono'].astype(str)
-            .str.replace(r'[^\d,-]', '', regex=True)
-            .str.replace('.', '', regex=False)
-            .str.replace(',', '.', regex=False)
-        )
-        df['monto_pago'] = pd.to_numeric(df['monto_pago'], errors='coerce').fillna(0)
+        df_final = pd.DataFrame(registros)
+        df_final = df_final.drop_duplicates().reset_index(drop=True)
         
-        # Quedarse solo con ingresos positivos
-        df = df[df['monto_pago'] > 0].copy()
-
-        # Extraer RUT desde la glosa
-        df['descripcion_glosa'] = df['glosa'].astype(str)
-        df['rut_detectado'] = df['descripcion_glosa'].apply(extraer_rut_de_texto)
-        df['fecha'] = df['fecha'].astype(str) if 'fecha' in df.columns else 'S/F'
-
-        cols_finales = ['fecha', 'rut_detectado', 'monto_pago', 'descripcion_glosa']
-        return df[cols_finales].reset_index(drop=True), "OK"
+        return df_final, "OK"
 
     except Exception as e:
-        return None, f"Error al procesar la cartola: {str(e)}"
+        return None, f"Error interno al procesar cartola: {str(e)}"
 
 
 # ---------------------------------------------------------
@@ -165,21 +166,20 @@ st.divider()
 if archivo_cartola is not None:
     st.subheader("2. Cartola Bancaria Normalizada")
     
-    with st.spinner("Leyendo y extrayendo RUTs de la cartola bancaria..."):
+    with st.spinner("Leyendo y extrayendo movimientos de la cartola bancaria..."):
         df_cartola, mensaje = normalizar_cartola(archivo_cartola)
         
     if df_cartola is not None and not df_cartola.empty:
-        st.success(f"¡Cartola procesada con éxito! Se detectaron **{len(df_cartola)}** movimientos de ingreso.")
+        st.success(f"¡Cartola procesada con éxito! Se detectaron **{len(df_cartola)}** movimientos.")
         
-        # Métricas de la cartola
         m1, m2 = st.columns(2)
         m1.metric("Total Ingresos Detectados", f"$ {df_cartola['monto_pago'].sum():,.0f}".replace(",", "."))
         m2.metric("RUTs Identificados en Glosa", f"{(df_cartola['rut_detectado'] != 'NO_DETECTADO').sum()} de {len(df_cartola)}")
 
-        # Tabla interactiva
         st.dataframe(
             df_cartola.style.format({'monto_pago': '$ {:,.0f}'}),
             use_container_width=True
         )
     else:
-        st.error(f"No se pudieron extraer abonos válidos. Detalle: {mensaje}")
+        st.error(f"Detalle de lectura: {mensaje}")
+
