@@ -163,43 +163,54 @@ def extraer_monto_chileno_estricto(texto_o_celda):
 
 
 # ---------------------------------------------------------
-# PROCESAMIENTO DE CARTOLA BANCARIA
+# PROCESAMIENTO DE CARTOLA BANCARIA (CORREGIDO PÁGINAS PDF)
 # ---------------------------------------------------------
 
 def normalizar_cartola(archivo_subido):
-    """Procesa cartolas bancarias reconociendo depósitos válidos."""
+    """Procesa cartolas bancarias reconociendo depósitos válidos sin descartar filas en cambios de página."""
     nombre_archivo = archivo_subido.name.lower()
     registros_ok = []
     registros_dudosos = []
 
-    palabras_ignorar = [
+    # Solo ignoramos filas que sean explícitamente encabezados o saldos globales
+    palabras_cabecera_estricta = [
         'saldo inicial', 'saldo final', 'cartola de cuenta', 
         'canal o sucursal', 'nro. docto', 'abonos (clp)', 
-        'monto abono', 'fecha descripción', 'movimientos', 'encabezado'
+        'monto abono', 'fecha descripción', 'movimientos', 'encabezado de cuenta'
     ]
 
     try:
         if nombre_archivo.endswith('.pdf'):
             with pdfplumber.open(archivo_subido) as pdf:
                 for num_pag, pagina in enumerate(pdf.pages, start=1):
+                    # Extraemos las tablas de la página
                     tablas = pagina.extract_tables()
+                    
                     for tabla in tablas:
                         for fila in tabla:
                             if not fila:
                                 continue
                             
+                            # Limpieza básica de la fila
                             f_clean = [str(c).strip().replace('\n', ' ') for c in fila if c is not None and str(c).strip() != '']
                             texto_fila = " ".join(f_clean)
                             texto_lower = texto_fila.lower()
                             
-                            if not f_clean or any(p in texto_lower for p in palabras_ignorar):
+                            if not f_clean:
+                                continue
+
+                            # SOLO omitimos si la fila es explícitamente un encabezado repetido SIN fecha
+                            es_cabecera = any(cabe in texto_lower for cabe in palabras_cabecera_estricta)
+                            if es_cabecera and not re.search(r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b', texto_fila):
                                 continue
                             
+                            # Buscar fecha
                             match_fecha = re.search(r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b', texto_fila)
                             fecha = match_fecha.group(0) if match_fecha else None
                             
                             identificador = extraer_rut_o_nombre(texto_fila)
 
+                            # Extraer monto
                             monto_encontrado = None
                             for celda in reversed(f_clean):
                                 m = extraer_monto_chileno_estricto(celda)
@@ -210,6 +221,7 @@ def normalizar_cartola(archivo_subido):
                             if not monto_encontrado:
                                 monto_encontrado = extraer_monto_chileno_estricto(texto_fila)
 
+                            # Si tiene Fecha + Monto + Identificador, ES UNA FILA VÁLIDA (incluso si es la 1ra fila de la pág. 2, 3, etc.)
                             if fecha and monto_encontrado and identificador != "NO_DETECTADO":
                                 registros_ok.append({
                                     'Fecha': fecha,
@@ -218,7 +230,7 @@ def normalizar_cartola(archivo_subido):
                                     'Descripción Glosa': texto_fila[:120]
                                 })
                             else:
-                                if len(texto_fila) > 8:
+                                if len(texto_fila) > 8 and not es_cabecera:
                                     motivo = []
                                     if not fecha: motivo.append("Sin fecha")
                                     if not monto_encontrado: motivo.append("Monto no detectado")
@@ -264,6 +276,7 @@ def normalizar_cartola(archivo_subido):
     except Exception as e:
         return pd.DataFrame(), pd.DataFrame(), f"Error al procesar cartola: {str(e)}"
 
+                                   
 
 # ---------------------------------------------------------
 # PROCESAMIENTO DE REGISTRO DE VENTAS
