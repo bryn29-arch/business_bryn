@@ -266,7 +266,7 @@ def normalizar_cartola(archivo_subido):
 
 
 # ---------------------------------------------------------
-# PROCESAMIENTO DE REGISTRO DE VENTAS (ESTRUCTURA UNIFICADA RUT 1 / RUT 2)
+# PROCESAMIENTO DE REGISTRO DE VENTAS
 # ---------------------------------------------------------
 
 def normalizar_ventas(archivo_subido):
@@ -302,19 +302,13 @@ def normalizar_ventas(archivo_subido):
         cols_clean = {c: str(c).strip() for c in df_raw.columns if pd.notna(c)}
         df_raw = df_raw.rename(columns=cols_clean)
 
-        # -----------------------------------------------------
-        # DETECCIÓN DE COLUMNA DE FOLIO / NRO DOCUMENTO
-        # -----------------------------------------------------
         col_folio = None
-        
-        # Palabras que descartan que una columna sea un folio
         palabras_exclusion = [
             'tipo', 'especie', 'descripcion', 'descrip', 'monto', 'total', 
             'saldo', 'rut', 'nombre', 'razon', 'fecha', 'emision', 'venc', 
             'deudor', 'cliente', 'receptor', 'emisor', 'sucursal'
         ]
 
-        # 1. Búsqueda por coincidencia alta de folio
         candidatos_primarios = [
             c for c in df_raw.columns 
             if any(k in c.lower() for k in ['folio', 'nro.docto', 'nro_docto', 'nro. docto', 'nro factura', 'nro_factura', 'num_docto', 'num. docto'])
@@ -324,39 +318,31 @@ def normalizar_ventas(archivo_subido):
         if candidatos_primarios:
             col_folio = candidatos_primarios[0]
         else:
-            # 2. Búsqueda secundaria por patrones numéricos de documento ('nro', 'num', 'docto', 'documento')
             candidatos_secundarios = [
                 c for c in df_raw.columns 
                 if any(k in c.lower() for k in ['nro', 'num', 'docto', 'documento', 'factura'])
                 and not any(ex in c.lower() for ex in palabras_exclusion)
             ]
-            
-            # Evaluamos cuál de los candidatos secundarios realmente tiene números
             for cand in candidatos_secundarios:
                 muestra = df_raw[cand].dropna().astype(str).head(10)
-                # Si la mayoría de la muestra son valores numéricos (ej. 1234, 5580, etc.)
                 numericos = [s for s in muestra if re.search(r'\b\d+\b', s.split('.')[0])]
                 if len(numericos) >= len(muestra) * 0.5:
                     col_folio = cand
                     break
 
-        # Detectar columna de Monto
         col_monto = next((c for c in df_raw.columns if any(k in c.lower() for k in [
             'v. docto.', 'v_docto', 'v. docto', 'v.adeudado', 'monto_total', 'total', 'monto', 'saldo', 'monto total'
         ])), None)
 
-        # Detectar columnas de RUT y Nombres
         rut_cols = [c for c in df_raw.columns if 'rut' in c.lower()]
         nom_cols = [c for c in df_raw.columns if any(k in c.lower() for k in ['nombre', 'razon', 'razón', 'social', 'cliente', 'deudor', 'receptor', 'emisor', 'pagador']) and c not in rut_cols]
 
         df_final = pd.DataFrame()
 
-        # Función de extracción limpia del folio
         def extraer_numero_folio(val):
             if pd.isna(val):
                 return ""
             val_str = str(val).strip()
-            # Extraer solo dígitos de la celda (remueve decimales .0 de Excel)
             val_limpio = val_str.split('.')[0] if '.' in val_str else val_str
             numeros = re.findall(r'\d+', val_limpio)
             if numeros:
@@ -368,7 +354,6 @@ def normalizar_ventas(archivo_subido):
         else:
             df_final['Folio'] = [f"{i+1}" for i in range(len(df_raw))]
 
-        # RUT 1 y Nombre 1
         if len(rut_cols) >= 1:
             df_final['RUT 1'] = df_raw[rut_cols[0]].astype(str).apply(lambda x: extraer_rut_o_nombre(x) if 'NO_DETECTADO' not in extraer_rut_o_nombre(x) else str(x).strip().upper())
         else:
@@ -379,7 +364,6 @@ def normalizar_ventas(archivo_subido):
         else:
             df_final['Nombre 1'] = "N/A"
 
-        # RUT 2 y Nombre 2 (Si existen)
         if len(rut_cols) >= 2:
             df_final['RUT 2'] = df_raw[rut_cols[1]].astype(str).apply(lambda x: extraer_rut_o_nombre(x) if 'NO_DETECTADO' not in extraer_rut_o_nombre(x) else str(x).strip().upper())
             df_final['Nombre 2'] = df_raw[nom_cols[1]].astype(str).str.strip().str.upper() if len(nom_cols) >= 2 else "N/A"
@@ -387,7 +371,6 @@ def normalizar_ventas(archivo_subido):
         else:
             cols_ordenadas = ['Folio', 'RUT 1', 'Nombre 1', 'Monto Total']
 
-        # Monto Total
         df_final['Monto Total'] = df_raw[col_monto].apply(lambda x: extraer_monto_chileno_estricto(x) or 0) if col_monto else 0
 
         return df_final[cols_ordenadas].reset_index(drop=True), "OK"
@@ -396,59 +379,63 @@ def normalizar_ventas(archivo_subido):
         return None, f"Error al procesar ventas: {str(e)}"
 
 
-
-
-
 # ---------------------------------------------------------
-# CONCILIACIÓN AUTOMÁTICA UNIFICADA
+# CONCILIACIÓN AUTOMÁTICA UNIFICADA (CORREGIDA 1 A 1)
 # ---------------------------------------------------------
 
 def conciliar_informacion_flexible(df_cartola, df_ventas):
-    """Conciliación automática buscando coincidencias en RUT 1, RUT 2, Nombre 1 o Nombre 2."""
+    """
+    Conciliación automática 1 a 1 buscando coincidencias en RUT 1, RUT 2, Nombre 1 o Nombre 2,
+    descartando facturas ya consumidas para evitar duplicación sobre un mismo folio.
+    """
     if df_cartola.empty or df_ventas is None or df_ventas.empty:
         return pd.DataFrame(), pd.DataFrame()
 
     cruce_list = []
-    facturas_usadas = set()
+    facturas_usadas = set()  # Guarda los folios que ya fueron asignados
 
     for idx_c, row_c in df_cartola.iterrows():
         id_cartola = str(row_c['Identificador / Cliente']).strip().upper()
         monto_pago = float(row_c['Monto Pago'])
         
+        # Filtramos facturas disponibles (que NO hayan sido conciliadas previamente)
+        ventas_disponibles = df_ventas[~df_ventas['Folio'].isin(facturas_usadas)]
+        
         coincidencias = pd.DataFrame()
         criterio_encontrado = ""
 
         # Coincidencia 1: RUT 1
-        if 'RUT 1' in df_ventas.columns:
-            coincidencias = df_ventas[df_ventas['RUT 1'].str.upper() == id_cartola]
+        if 'RUT 1' in ventas_disponibles.columns:
+            coincidencias = ventas_disponibles[ventas_disponibles['RUT 1'].str.upper() == id_cartola]
             if not coincidencias.empty:
                 criterio_encontrado = "RUT 1"
 
         # Coincidencia 2: RUT 2 (Si existe)
-        if coincidencias.empty and 'RUT 2' in df_ventas.columns:
-            coincidencias = df_ventas[df_ventas['RUT 2'].str.upper() == id_cartola]
+        if coincidencias.empty and 'RUT 2' in ventas_disponibles.columns:
+            coincidencias = ventas_disponibles[ventas_disponibles['RUT 2'].str.upper() == id_cartola]
             if not coincidencias.empty:
                 criterio_encontrado = "RUT 2"
 
         # Coincidencia 3: Nombre 1
-        if coincidencias.empty and 'Nombre 1' in df_ventas.columns and len(id_cartola) > 3:
-            coincidencias = df_ventas[df_ventas['Nombre 1'].str.upper().str.contains(id_cartola, regex=False, na=False)]
+        if coincidencias.empty and 'Nombre 1' in ventas_disponibles.columns and len(id_cartola) > 3:
+            coincidencias = ventas_disponibles[ventas_disponibles['Nombre 1'].str.upper().str.contains(id_cartola, regex=False, na=False)]
             if not coincidencias.empty:
                 criterio_encontrado = "Nombre 1"
 
         # Coincidencia 4: Nombre 2
-        if coincidencias.empty and 'Nombre 2' in df_ventas.columns and len(id_cartola) > 3:
-            coincidencias = df_ventas[df_ventas['Nombre 2'].str.upper().str.contains(id_cartola, regex=False, na=False)]
+        if coincidencias.empty and 'Nombre 2' in ventas_disponibles.columns and len(id_cartola) > 3:
+            coincidencias = ventas_disponibles[ventas_disponibles['Nombre 2'].str.upper().str.contains(id_cartola, regex=False, na=False)]
             if not coincidencias.empty:
                 criterio_encontrado = "Nombre 2"
 
-        # Evaluar resultado del Match
+        # Evaluar resultado del Match (Priorizando coincidencia exacta de monto)
         if not coincidencias.empty:
             match_exacto = coincidencias[coincidencias['Monto Total'] == monto_pago]
             
             if not match_exacto.empty:
+                # Se toma la primera factura disponible con monto exacto
                 f_row = match_exacto.iloc[0]
-                facturas_usadas.add(f_row['Folio'])
+                facturas_usadas.add(f_row['Folio'])  # Consumir folio
                 cruce_list.append({
                     'Fecha Banco': row_c['Fecha'],
                     'Identificador Cartola': id_cartola,
@@ -461,8 +448,9 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
                     'Estado Conciliación': '🟢 Conciliado Exacto'
                 })
             else:
+                # Si coincide el RUT/Nombre pero difiere el monto, asignamos la primera disponible
                 f_row = coincidencias.iloc[0]
-                facturas_usadas.add(f_row['Folio'])
+                facturas_usadas.add(f_row['Folio'])  # Consumir folio
                 dif = monto_pago - f_row['Monto Total']
                 cruce_list.append({
                     'Fecha Banco': row_c['Fecha'],
@@ -690,4 +678,3 @@ if not df_cartola_global.empty or df_ventas_global is not None:
                 mime="text/csv",
                 use_container_width=True
             )
-
