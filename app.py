@@ -163,16 +163,15 @@ def extraer_monto_chileno_estricto(texto_o_celda):
 
 
 # ---------------------------------------------------------
-# PROCESAMIENTO DE CARTOLA BANCARIA (CORREGIDO PÁGINAS PDF)
+# PROCESAMIENTO DE CARTOLA BANCARIA (REPARACIÓN MULTI-PÁGINA)
 # ---------------------------------------------------------
 
 def normalizar_cartola(archivo_subido):
-    """Procesa cartolas bancarias reconociendo depósitos válidos sin descartar filas en cambios de página."""
+    """Procesa cartolas bancarias garantizando la lectura de las primeras filas en hojas continuas."""
     nombre_archivo = archivo_subido.name.lower()
     registros_ok = []
     registros_dudosos = []
 
-    # Solo ignoramos filas que sean explícitamente encabezados o saldos globales
     palabras_cabecera_estricta = [
         'saldo inicial', 'saldo final', 'cartola de cuenta', 
         'canal o sucursal', 'nro. docto', 'abonos (clp)', 
@@ -183,65 +182,74 @@ def normalizar_cartola(archivo_subido):
         if nombre_archivo.endswith('.pdf'):
             with pdfplumber.open(archivo_subido) as pdf:
                 for num_pag, pagina in enumerate(pdf.pages, start=1):
-                    # Extraemos las tablas de la página
-                    tablas = pagina.extract_tables()
                     
+                    # --- ESTRATEGIA 1: Extracción por Tablas ---
+                    filas_procesadas = []
+                    tablas = pagina.extract_tables()
                     for tabla in tablas:
                         for fila in tabla:
-                            if not fila:
-                                continue
-                            
-                            # Limpieza básica de la fila
-                            f_clean = [str(c).strip().replace('\n', ' ') for c in fila if c is not None and str(c).strip() != '']
-                            texto_fila = " ".join(f_clean)
-                            texto_lower = texto_fila.lower()
-                            
-                            if not f_clean:
-                                continue
+                            if fila:
+                                f_clean = [str(c).strip().replace('\n', ' ') for c in fila if c is not None and str(c).strip() != '']
+                                if f_clean:
+                                    filas_procesadas.append(" ".join(f_clean))
 
-                            # SOLO omitimos si la fila es explícitamente un encabezado repetido SIN fecha
-                            es_cabecera = any(cabe in texto_lower for cabe in palabras_cabecera_estricta)
-                            if es_cabecera and not re.search(r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b', texto_fila):
-                                continue
-                            
-                            # Buscar fecha
-                            match_fecha = re.search(r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b', texto_fila)
-                            fecha = match_fecha.group(0) if match_fecha else None
-                            
-                            identificador = extraer_rut_o_nombre(texto_fila)
+                    # --- ESTRATEGIA 2: Rescate por Texto Plano (Para no perder la 1ª fila de la hoja) ---
+                    texto_pag = pagina.extract_text() or ""
+                    lineas_texto = [l.strip() for l in texto_pag.split('\n') if l.strip()]
 
-                            # Extraer monto
-                            monto_encontrado = None
-                            for celda in reversed(f_clean):
-                                m = extraer_monto_chileno_estricto(celda)
-                                if m is not None:
-                                    monto_encontrado = m
-                                    break
+                    # Unimos ambas estrategias evitando duplicados exactos
+                    todas_las_lineas = filas_procesadas.copy()
+                    for lin in lineas_texto:
+                        if lin not in todas_las_lineas:
+                            todas_las_lineas.append(lin)
 
-                            if not monto_encontrado:
-                                monto_encontrado = extraer_monto_chileno_estricto(texto_fila)
+                    # --- EVALUACIÓN DE CADA LÍNEA ---
+                    for texto_fila in todas_las_lineas:
+                        texto_lower = texto_fila.lower()
 
-                            # Si tiene Fecha + Monto + Identificador, ES UNA FILA VÁLIDA (incluso si es la 1ra fila de la pág. 2, 3, etc.)
-                            if fecha and monto_encontrado and identificador != "NO_DETECTADO":
-                                registros_ok.append({
+                        # Descartar solo si es encabezado estricto Y no tiene fecha
+                        es_cabecera = any(cabe in texto_lower for cabe in palabras_cabecera_estricta)
+                        has_fecha = bool(re.search(r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b', texto_fila))
+
+                        if es_cabecera and not has_fecha:
+                            continue
+
+                        # Buscar Fecha
+                        match_fecha = re.search(r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b', texto_fila)
+                        fecha = match_fecha.group(0) if match_fecha else None
+
+                        # Buscar RUT / Nombre
+                        identificador = extraer_rut_o_nombre(texto_fila)
+
+                        # Buscar Monto
+                        monto_encontrado = extraer_monto_chileno_estricto(texto_fila)
+
+                        # Si la fila tiene los 3 datos, es una transacción válida
+                        if fecha and monto_encontrado and identificador != "NO_DETECTADO":
+                            registro = {
+                                'Fecha': fecha,
+                                'Identificador / Cliente': identificador,
+                                'Monto Pago': monto_encontrado,
+                                'Descripción Glosa': texto_fila[:120]
+                            }
+                            # Evitamos duplicar en caso de que coincidieran la tabla y el texto plano
+                            if registro not in registros_ok:
+                                registros_ok.append(registro)
+                        else:
+                            # Filtramos ruido de encabezados o pie de página
+                            if len(texto_fila) > 15 and has_fecha and not es_cabecera:
+                                motivo = []
+                                if not monto_encontrado: motivo.append("Monto no detectado")
+                                if identificador == "NO_DETECTADO": motivo.append("Cliente no identificado")
+
+                                reg_dudoso = {
+                                    'Página': num_pag,
                                     'Fecha': fecha,
-                                    'Identificador / Cliente': identificador,
-                                    'Monto Pago': monto_encontrado,
-                                    'Descripción Glosa': texto_fila[:120]
-                                })
-                            else:
-                                if len(texto_fila) > 8 and not es_cabecera:
-                                    motivo = []
-                                    if not fecha: motivo.append("Sin fecha")
-                                    if not monto_encontrado: motivo.append("Monto no detectado")
-                                    if identificador == "NO_DETECTADO": motivo.append("Cliente no identificado")
-
-                                    registros_dudosos.append({
-                                        'Página': num_pag,
-                                        'Fecha': fecha if fecha else "S/F",
-                                        'Glosa Capturada': texto_fila[:100],
-                                        'Motivo Revisión': ", ".join(motivo)
-                                    })
+                                    'Glosa Capturada': texto_fila[:100],
+                                    'Motivo Revisión': ", ".join(motivo)
+                                }
+                                if reg_dudoso not in registros_dudosos:
+                                    registros_dudosos.append(reg_dudoso)
 
         elif nombre_archivo.endswith(('.xlsx', '.xls', '.csv')):
             df_raw = pd.read_excel(archivo_subido) if nombre_archivo.endswith(('.xlsx', '.xls')) else pd.read_csv(archivo_subido)
@@ -259,14 +267,6 @@ def normalizar_cartola(archivo_subido):
                         'Monto Pago': m,
                         'Descripción Glosa': texto_fila[:100]
                     })
-                else:
-                    if len(texto_fila) > 10:
-                        registros_dudosos.append({
-                            'Página': 1,
-                            'Fecha': fecha,
-                            'Glosa Capturada': texto_fila[:100],
-                            'Motivo Revisión': "Información incompleta o monto no reconocido"
-                        })
 
         df_ok = pd.DataFrame(registros_ok).reset_index(drop=True) if registros_ok else pd.DataFrame(columns=['Fecha', 'Identificador / Cliente', 'Monto Pago', 'Descripción Glosa'])
         df_dudosos = pd.DataFrame(registros_dudosos).reset_index(drop=True) if registros_dudosos else pd.DataFrame(columns=['Página', 'Fecha', 'Glosa Capturada', 'Motivo Revisión'])
@@ -275,6 +275,8 @@ def normalizar_cartola(archivo_subido):
 
     except Exception as e:
         return pd.DataFrame(), pd.DataFrame(), f"Error al procesar cartola: {str(e)}"
+
+                            
 
                                    
 
