@@ -1,6 +1,6 @@
 streamlit
 pandas
-numpy
-pdfplumber
 openpyxl
 xlrd
+weasyprint
+pdfplumber
