@@ -270,7 +270,7 @@ def normalizar_cartola(archivo_subido):
 # ---------------------------------------------------------
 
 def normalizar_ventas(archivo_subido):
-    """Procesa el Registro/Cartera identificando de forma agnóstica RUT 1, Nombre 1, RUT 2, Nombre 2 y Folio Numérico."""
+    """Procesa el Registro/Cartera identificando de forma precisa el Folio numérico real."""
     nombre_archivo = archivo_subido.name.lower()
     try:
         if nombre_archivo.endswith(('.xlsx', '.xls')):
@@ -286,7 +286,7 @@ def normalizar_ventas(archivo_subido):
         if df_raw.empty:
             return None, "El archivo seleccionado está vacío."
 
-        # Detectar encabezados
+        # Detectar la fila de encabezados correcta
         header_row_idx = None
         for idx in range(min(12, len(df_raw))):
             row_str = " ".join([str(val).lower() for val in df_raw.iloc[idx].values if pd.notna(val)])
@@ -303,28 +303,42 @@ def normalizar_ventas(archivo_subido):
         df_raw = df_raw.rename(columns=cols_clean)
 
         # -----------------------------------------------------
-        # DETECCIÓN DE COLUMNA DE FOLIO (NUMÉRICO)
+        # DETECCIÓN DE COLUMNA DE FOLIO / NRO DOCUMENTO
         # -----------------------------------------------------
         col_folio = None
         
-        # 1. Búsqueda prioritaria de número de documento/folio excluyendo "tipo"
-        candidatos_folio = [
-            c for c in df_raw.columns 
-            if any(k in c.lower() for k in ['folio', 'nro.docto', 'nro_docto', 'nro. docto', 'nro factura', 'num. docto', 'numero docto', 'nro', 'num'])
-            and not any(t in c.lower() for t in ['tipo', 'especie', 'descripcion'])
+        # Palabras que descartan que una columna sea un folio
+        palabras_exclusion = [
+            'tipo', 'especie', 'descripcion', 'descrip', 'monto', 'total', 
+            'saldo', 'rut', 'nombre', 'razon', 'fecha', 'emision', 'venc', 
+            'deudor', 'cliente', 'receptor', 'emisor', 'sucursal'
         ]
 
-        if candidatos_folio:
-            col_folio = candidatos_folio[0]
+        # 1. Búsqueda por coincidencia alta de folio
+        candidatos_primarios = [
+            c for c in df_raw.columns 
+            if any(k in c.lower() for k in ['folio', 'nro.docto', 'nro_docto', 'nro. docto', 'nro factura', 'nro_factura', 'num_docto', 'num. docto'])
+            and not any(ex in c.lower() for ex in palabras_exclusion)
+        ]
+
+        if candidatos_primarios:
+            col_folio = candidatos_primarios[0]
         else:
-            # 2. Respaldo secundario por palabras genéricas de documento
+            # 2. Búsqueda secundaria por patrones numéricos de documento ('nro', 'num', 'docto', 'documento')
             candidatos_secundarios = [
                 c for c in df_raw.columns 
-                if any(k in c.lower() for k in ['docto', 'factura', 'documento'])
-                and not any(t in c.lower() for t in ['tipo', 'especie'])
+                if any(k in c.lower() for k in ['nro', 'num', 'docto', 'documento', 'factura'])
+                and not any(ex in c.lower() for ex in palabras_exclusion)
             ]
-            if candidatos_secundarios:
-                col_folio = candidatos_secundarios[0]
+            
+            # Evaluamos cuál de los candidatos secundarios realmente tiene números
+            for cand in candidatos_secundarios:
+                muestra = df_raw[cand].dropna().astype(str).head(10)
+                # Si la mayoría de la muestra son valores numéricos (ej. 1234, 5580, etc.)
+                numericos = [s for s in muestra if re.search(r'\b\d+\b', s.split('.')[0])]
+                if len(numericos) >= len(muestra) * 0.5:
+                    col_folio = cand
+                    break
 
         # Detectar columna de Monto
         col_monto = next((c for c in df_raw.columns if any(k in c.lower() for k in [
@@ -337,19 +351,20 @@ def normalizar_ventas(archivo_subido):
 
         df_final = pd.DataFrame()
 
-        # Extraer y limpiar Folio (obtener el número entero de la celda)
-        def limpiar_folio(val):
+        # Función de extracción limpia del folio
+        def extraer_numero_folio(val):
             if pd.isna(val):
                 return ""
             val_str = str(val).strip()
-            # Extraer los dígitos continuos del folio (ej: si viene 000123.0 -> 123, o 'F-4580' -> 4580)
-            nums = re.findall(r'\d+', val_str.split('.')[0] if '.' in val_str else val_str)
-            if nums:
-                return "".join(nums)
+            # Extraer solo dígitos de la celda (remueve decimales .0 de Excel)
+            val_limpio = val_str.split('.')[0] if '.' in val_str else val_str
+            numeros = re.findall(r'\d+', val_limpio)
+            if numeros:
+                return "".join(numeros)
             return val_str
 
         if col_folio:
-            df_final['Folio'] = df_raw[col_folio].apply(limpiar_folio)
+            df_final['Folio'] = df_raw[col_folio].apply(extraer_numero_folio)
         else:
             df_final['Folio'] = [f"{i+1}" for i in range(len(df_raw))]
 
@@ -379,6 +394,8 @@ def normalizar_ventas(archivo_subido):
 
     except Exception as e:
         return None, f"Error al procesar ventas: {str(e)}"
+
+
 
 
 
