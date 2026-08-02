@@ -6,7 +6,7 @@ import pdfplumber
 import io
 
 # ---------------------------------------------------------
-# CONFIGURACIÓN DE PÁGINA Y CSS LUXURY ENTERPRISE
+# CONFIGURACIÓN DE PÁGINA Y ESTILOS
 # ---------------------------------------------------------
 st.set_page_config(
     page_title="FinanSmart | Plataforma de Conciliación",
@@ -27,12 +27,6 @@ st.markdown("""
         border-radius: 16px;
         padding: 20px;
         box-shadow: 0 10px 25px -5px rgba(15, 23, 42, 0.05);
-        transition: all 0.35s ease;
-    }
-    
-    div[data-testid="stFileUploader"]:hover {
-        border-color: #6366f1;
-        box-shadow: 0 15px 30px -10px rgba(99, 102, 241, 0.15);
     }
     
     div[data-testid="stFileUploader"] button, .stButton > button, div[data-testid="stDownloadButton"] > button {
@@ -43,7 +37,6 @@ st.markdown("""
         font-weight: 600 !important;
         font-size: 0.9rem !important;
         padding: 10px 22px !important;
-        box-shadow: 0 4px 14px 0 rgba(15, 23, 42, 0.35) !important;
     }
     
     div[data-testid="stMetric"] {
@@ -51,22 +44,7 @@ st.markdown("""
         padding: 20px;
         border-radius: 14px;
         border: 1px solid #e2e8f0;
-        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.03);
         border-left: 5px solid #4f46e5;
-    }
-    
-    div[data-testid="stMetricLabel"] {
-        font-weight: 600;
-        color: #64748b;
-        font-size: 0.9rem;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-    }
-
-    div[data-testid="stMetricValue"] {
-        color: #0f172a;
-        font-weight: 700;
-        font-size: 2rem;
     }
 
     .stTabs [data-baseweb="tab-list"] {
@@ -90,14 +68,15 @@ st.markdown("""
 
 
 # ---------------------------------------------------------
-# 1. FUNCIONES MOTORAS DE EXTRACCIÓN Y NORMALIZACIÓN
+# FUNCIONES AUXILIARES DE EXTRACCIÓN
 # ---------------------------------------------------------
 
 def extraer_rut_o_nombre(texto):
-    """Detecta RUTs o razón social en textos y glosas."""
+    """Detecta RUTs o Razón Social en textos y glosas."""
     if not isinstance(texto, str):
         return "NO_DETECTADO"
     
+    # 1. RUT Estándar (12.345.678-9 o 12345678-9)
     match_std = re.search(r'\b(\d{1,2}(?:\.?\d{3}){2}-?[\dkK])\b', texto)
     if match_std:
         rut_raw = match_std.group(0).replace('.', '').upper()
@@ -105,12 +84,14 @@ def extraer_rut_o_nombre(texto):
             rut_raw = rut_raw[:-1] + '-' + rut_raw[-1]
         return rut_raw
 
+    # 2. RUT Continuo (0772895461)
     match_continuo = re.search(r'\b0?(\d{7,8}[\dkK])\b', texto)
     if match_continuo:
         raw = match_continuo.group(1).upper()
         return f"{raw[:-1]}-{raw[-1]}"
 
-    match_nombre = re.search(r'(?:Traspaso De:|Pago:)\s*([A-Za-z0-9\s]+)', texto, re.IGNORECASE)
+    # 3. Nombre en Glosa (Traspaso de / Pago:)
+    match_nombre = re.search(r'(?:Traspaso De:|Pago:|Transferencia de:)\s*([A-Za-z0-9\s]+)', texto, re.IGNORECASE)
     if match_nombre:
         nombre = match_nombre.group(1).strip()
         nombre = re.sub(r'\s+(Internet|Cta|Cuenta|Transferencia|Oficina).*$', '', nombre, flags=re.IGNORECASE)
@@ -119,48 +100,56 @@ def extraer_rut_o_nombre(texto):
     return "NO_DETECTADO"
 
 
-def extraer_monto_chileno(texto_o_celda):
-    """Extrae y convierte cualquier formato de monto a un entero limpio."""
+def extraer_monto_chileno_estricto(texto_o_celda):
+    """Extrae montos verificando formato explicito de dinero (evita tomar folios o sucursales)."""
     if pd.isna(texto_o_celda) or str(texto_o_celda).strip() in ['', 'None', 'nan', '0']:
-        return 0
+        return None
 
     if isinstance(texto_o_celda, (int, float)):
-        return int(round(float(texto_o_celda)))
+        val = int(round(float(texto_o_celda)))
+        return val if val > 0 else None
 
     texto = str(texto_o_celda).strip()
-    texto_limpio = re.sub(r'[,.]00$', '', texto)
-    
-    coincidencias = re.findall(r'\b\d{1,3}(?:[.,]\d{3})+\b', texto_limpio)
+
+    # Formato con separador de miles: 1.250.000 o 1,250,000
+    coincidencias = re.findall(r'\b\d{1,3}(?:[.,]\d{3})+\b', texto)
     if coincidencias:
         monto_str = coincidencias[-1].replace('.', '').replace(',', '')
         try:
-            return int(monto_str)
+            val = int(monto_str)
+            return val if val > 0 else None
         except ValueError:
             pass
 
-    enteros = re.findall(r'\b\d{1,10}\b', texto_limpio)
+    # Formato numérico directo mayor a 100 pesos (evita ceros y códigos de 1 o 2 dígitos)
+    enteros = re.findall(r'\b\d{3,10}\b', texto)
     if enteros:
         try:
-            return int(enteros[-1])
+            val = int(enteros[-1])
+            return val if val > 100 else None
         except ValueError:
             pass
-        
-    return 0
 
+    return None
+
+
+# ---------------------------------------------------------
+# PROCESAMIENTO DE CARTOLA BANCARIA
+# ---------------------------------------------------------
 
 def normalizar_cartola(archivo_subido):
-    """Lee y estandariza la cartola bancaria en PDF, Excel o CSV."""
+    """Procesa cartolas bancarias y clasifica estrictamente filas incompletas."""
     nombre_archivo = archivo_subido.name.lower()
+    registros_ok = []
+    registros_dudosos = []
+
+    palabras_ignorar = [
+        'saldo inicial', 'saldo final', 'cartola de cuenta', 
+        'canal o sucursal', 'nro. docto', 'abonos (clp)', 
+        'monto abono', 'fecha descripción', 'movimientos', 'encabezado'
+    ]
+
     try:
-        registros_ok = []
-        registros_dudosos = []
-
-        palabras_ignorar = [
-            'saldo inicial', 'saldo final', 'cartola de cuenta', 
-            'canal o sucursal', 'nro. docto', 'abonos (clp)', 
-            'monto abono', 'fecha descripción', 'movimientos'
-        ]
-
         if nombre_archivo.endswith('.pdf'):
             with pdfplumber.open(archivo_subido) as pdf:
                 for num_pag, pagina in enumerate(pdf.pages, start=1):
@@ -178,49 +167,65 @@ def normalizar_cartola(archivo_subido):
                                 continue
                             
                             match_fecha = re.search(r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b', texto_fila)
-                            fecha = match_fecha.group(0) if match_fecha else "S/F"
+                            fecha = match_fecha.group(0) if match_fecha else None
                             
                             monto_encontrado = None
                             for celda in reversed(f_clean):
-                                m = extraer_monto_chileno(celda)
-                                if m > 0:
+                                m = extraer_monto_chileno_estricto(celda)
+                                if m is not None:
                                     monto_encontrado = m
                                     break
-                            
-                            identificador = extraer_rut_o_nombre(texto_fila)
-                            glosa_limpia = re.sub(r'\b\d{1,3}(?:[.,]\d{3})+\b', '', texto_fila).strip()
 
-                            if monto_encontrado:
+                            identificador = extraer_rut_o_nombre(texto_fila)
+
+                            # REGLA DE VALIDACIÓN DE FILA INCOMPLETA:
+                            # Si falta la fecha, o falta el monto válido, o falta el identificador -> A revisión manual
+                            if fecha and monto_encontrado and identificador != "NO_DETECTADO":
                                 registros_ok.append({
                                     'Fecha': fecha,
                                     'Identificador / Cliente': identificador,
                                     'Monto Pago': monto_encontrado,
-                                    'Descripción Glosa': glosa_limpia[:120]
+                                    'Descripción Glosa': texto_fila[:120]
                                 })
                             else:
-                                if len(texto_fila) > 10:
+                                if len(texto_fila) > 8:
+                                    motivo = []
+                                    if not fecha: motivo.append("Sin fecha")
+                                    if not monto_encontrado: motivo.append("Sin monto de abono válido")
+                                    if identificador == "NO_DETECTADO": motivo.append("Cliente no identificado")
+
                                     registros_dudosos.append({
                                         'Página': num_pag,
-                                        'Fecha': fecha,
+                                        'Fecha': fecha if fecha else "S/F",
                                         'Glosa Capturada': texto_fila[:100],
-                                        'Observación': 'Fila incompleta o monto no detectado'
+                                        'Motivo Revisión': ", ".join(motivo)
                                     })
 
         elif nombre_archivo.endswith(('.xlsx', '.xls', '.csv')):
             df_raw = pd.read_excel(archivo_subido) if nombre_archivo.endswith(('.xlsx', '.xls')) else pd.read_csv(archivo_subido)
             for idx, row in df_raw.iterrows():
                 texto_fila = " ".join([str(v) for v in row.values if pd.notna(v)])
-                m = extraer_monto_chileno(texto_fila)
-                if m > 0:
+                m = extraer_monto_chileno_estricto(texto_fila)
+                identificador = extraer_rut_o_nombre(texto_fila)
+
+                if m is not None and identificador != "NO_DETECTADO":
                     registros_ok.append({
                         'Fecha': 'VER_EXCEL',
-                        'Identificador / Cliente': extraer_rut_o_nombre(texto_fila),
+                        'Identificador / Cliente': identificador,
                         'Monto Pago': m,
                         'Descripción Glosa': texto_fila[:100]
                     })
+                else:
+                    if len(texto_fila) > 10:
+                        registros_dudosos.append({
+                            'Página': 1,
+                            'Fecha': "VER_EXCEL",
+                            'Glosa Capturada': texto_fila[:100],
+                            'Motivo Revisión': "Información incompleta o monto ambiguo"
+                        })
 
         df_ok = pd.DataFrame(registros_ok).reset_index(drop=True) if registros_ok else pd.DataFrame(columns=['Fecha', 'Identificador / Cliente', 'Monto Pago', 'Descripción Glosa'])
-        df_dudosos = pd.DataFrame(registros_dudosos).reset_index(drop=True) if registros_dudosos else pd.DataFrame(columns=['Página', 'Fecha', 'Glosa Capturada', 'Observación'])
+        df_dudosos = pd.DataFrame(registros_dudosos).reset_index(drop=True) if registros_dudosos else pd.DataFrame(columns=['Página', 'Fecha', 'Glosa Capturada', 'Motivo Revisión'])
 
         return df_ok, df_dudosos, "OK"
 
@@ -228,8 +233,12 @@ def normalizar_cartola(archivo_subido):
         return pd.DataFrame(), pd.DataFrame(), f"Error al procesar cartola: {str(e)}"
 
 
+# ---------------------------------------------------------
+# PROCESAMIENTO DE REGISTRO DE VENTAS / CARTERA
+# ---------------------------------------------------------
+
 def normalizar_ventas(archivo_subido):
-    """Lee y estandariza dinámicamente cualquier Registro de Ventas o Cartera de Documentos."""
+    """Procesa el Registro de Ventas o Cartera reconociendo exactamente Nro.Docto y montos."""
     nombre_archivo = archivo_subido.name.lower()
     try:
         if nombre_archivo.endswith(('.xlsx', '.xls')):
@@ -240,16 +249,16 @@ def normalizar_ventas(archivo_subido):
             except Exception:
                 df_raw = pd.read_csv(archivo_subido, sep=';', encoding='latin1')
         else:
-            return None, "Formato no soportado para el registro de ventas."
+            return None, "Formato de archivo no soportado."
 
         if df_raw.empty:
-            return None, "El archivo de ventas está vacío."
+            return None, "El archivo seleccionado está vacío."
 
-        # Detectar la fila de encabezados si hay filas vacías o con títulos institucionales arriba
+        # Detectar la fila de encabezados correcta si existen filas vacías o títulos arriba
         header_row_idx = None
         for idx in range(min(10, len(df_raw))):
             row_str = " ".join([str(val).lower() for val in df_raw.iloc[idx].values if pd.notna(val)])
-            if any(k in row_str for k in ['rut', 'cliente', 'deudor', 'docto', 'factura', 'monto', 'total', 'v. docto']):
+            if any(k in row_str for k in ['rut', 'cliente', 'deudor', 'docto', 'factura', 'v. docto']):
                 header_row_idx = idx
                 break
 
@@ -258,37 +267,31 @@ def normalizar_ventas(archivo_subido):
             df_raw = df_raw.iloc[header_row_idx + 1:].copy()
             df_raw.columns = new_headers
 
-        # Diccionario ampliado de sinónimos para detectar columnas de SII, ERPs y Factoring/Cartera
-        mapa_cols = {
-            'folio': [
-                'nro.docto', 'nro.docto.', 'nro_docto', 'nro.op.', 'folio', 'nro_factura', 
-                'numero', 'número', 'nro', 'factura', 'doc_num', 'docto', 'comprobante'
-            ],
-            'rut': [
-                'rut. deudor', 'rut_deudor', 'rut deudor', 'rut. clte', 'rut_clte', 'rut clte',
-                'rut', 'rut_cliente', 'rut cliente', 'rut emisor', 'rut_receptor', 'rut receptor'
-            ],
-            'razon_social': [
-                'nombre deudor', 'nombre_deudor', 'deudor', 'nombre cliente', 'nombre_cliente', 
-                'razon_social', 'razon social', 'razón social', 'cliente', 'receptor'
-            ],
-            'monto_total': [
-                'v. docto.', 'v_docto', 'v. docto', 'v.adeudado', 'v_adeudado', 'mto.abono',
-                'monto_total', 'total', 'monto total', 'monto', 'valor_total', 'total_con_iva'
-            ]
+        # Prioridad estricta de mapeo para evitar confundir Nro.Op con Nro.Docto (Folio)
+        mapa_cols_priorizado = {
+            'folio': ['nro.docto', 'nro.docto.', 'nro_docto', 'folio', 'nro_factura', 'numero', 'número', 'nro', 'factura', 'doc_num', 'nro.op.'],
+            'rut': ['rut. deudor', 'rut_deudor', 'rut. clte', 'rut_clte', 'rut', 'rut_cliente', 'rut cliente', 'rut emisor', 'rut_receptor', 'rut receptor'],
+            'razon_social': ['nombre deudor', 'nombre_deudor', 'nombre cliente', 'nombre_cliente', 'razon_social', 'razon social', 'razón social', 'cliente', 'receptor'],
+            'monto_total': ['v. docto.', 'v_docto', 'v. docto', 'v.adeudado', 'v_adeudado', 'monto_total', 'total', 'monto total', 'monto', 'valor_total']
         }
 
         col_map = {}
-        for col_std, sinonimos in mapa_cols.items():
-            for c in df_raw.columns:
-                c_clean = str(c).lower().strip().replace('\n', ' ')
-                if c_clean in sinonimos and c not in col_map:
-                    col_map[c] = col_std
+        cols_usadas = set()
+
+        for col_std, sinonimos in mapa_cols_priorizado.items():
+            for sin in sinonimos:
+                for c in df_raw.columns:
+                    c_clean = str(c).lower().strip().replace('\n', ' ')
+                    if c_clean == sin and c not in cols_usadas:
+                        col_map[c] = col_std
+                        cols_usadas.add(c)
+                        break
+                if col_std in col_map.values():
                     break
 
         df = df_raw.rename(columns=col_map)
 
-        # Asignar valores por defecto si alguna columna no estuvo en el archivo
+        # Asignación de valores por defecto si falta alguna columna
         if 'folio' not in df.columns:
             df['folio'] = [f"F-{i+1}" for i in range(len(df))]
         if 'rut' not in df.columns:
@@ -298,14 +301,15 @@ def normalizar_ventas(archivo_subido):
         if 'monto_total' not in df.columns:
             df['monto_total'] = 0
 
-        # Limpiar y convertir montos
-        df['monto_total'] = df['monto_total'].apply(extraer_monto_chileno)
+        # Normalizar montos
+        df['monto_total'] = df['monto_total'].apply(lambda x: extraer_monto_chileno_estricto(x) or 0)
 
-        # Normalizar el formato del RUT y nombres
+        # Normalizar RUT y Razón Social
         df['rut_cliente'] = df['rut'].astype(str).apply(
             lambda x: extraer_rut_o_nombre(x) if 'NO_DETECTADO' not in extraer_rut_o_nombre(x) else x.replace('.', '').upper().strip()
         )
         df['razon_social'] = df['razon_social'].astype(str).str.strip()
+        df['folio'] = df['folio'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
 
         df_final = df.rename(columns={
             'folio': 'Folio',
@@ -321,8 +325,12 @@ def normalizar_ventas(archivo_subido):
         return None, f"Error al procesar ventas: {str(e)}"
 
 
+# ---------------------------------------------------------
+# CONCILIACIÓN AUTOMÁTICA
+# ---------------------------------------------------------
+
 def conciliar_informacion(df_cartola, df_ventas):
-    """Realiza el cruce automático entre la cartola y las facturas de venta."""
+    """Cruza los depósitos de la cartola contra las facturas."""
     if df_cartola.empty or df_ventas is None or df_ventas.empty:
         return pd.DataFrame(), pd.DataFrame()
 
@@ -377,8 +385,6 @@ def conciliar_informacion(df_cartola, df_ventas):
             })
 
     df_cruce = pd.DataFrame(cruce_list)
-
-    # Facturas pendientes de pago
     ventas_pendientes = df_ventas[~df_ventas['Folio'].isin(facturas_usadas)].copy()
     if not ventas_pendientes.empty:
         ventas_pendientes['Estado'] = '🔵 Factura Pendiente de Pago'
@@ -387,21 +393,17 @@ def conciliar_informacion(df_cartola, df_ventas):
 
 
 def generar_excel_descarga(df_cartola, df_incompletos, df_ventas, df_cruce, df_pendientes, empresa, periodo_str):
-    """Genera el reporte de Excel completo con los resultados del cruce."""
+    """Genera reporte Excel consolidado."""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         if not df_cruce.empty:
             df_cruce.to_excel(writer, sheet_name='Detalle Cruce Conciliación', index=False)
-            
         if not df_pendientes.empty:
             df_pendientes.to_excel(writer, sheet_name='Ventas Pendientes Cobro', index=False)
-
         if not df_cartola.empty:
             df_cartola.to_excel(writer, sheet_name='Cartola Bancaria', index=False)
-
         if df_ventas is not None and not df_ventas.empty:
             df_ventas.to_excel(writer, sheet_name='Registro Ventas', index=False)
-
         if df_incompletos is not None and not df_incompletos.empty:
             df_incompletos.to_excel(writer, sheet_name='Revisiones Pendientes', index=False)
 
@@ -409,7 +411,7 @@ def generar_excel_descarga(df_cartola, df_incompletos, df_ventas, df_cruce, df_p
 
 
 # ---------------------------------------------------------
-# 2. INTERFAZ GRÁFICA DE USUARIO (STREAMLIT)
+# INTERFAZ GRÁFICA DE USUARIO
 # ---------------------------------------------------------
 
 with st.sidebar:
@@ -420,7 +422,6 @@ with st.sidebar:
     periodo = st.date_input("Mes de Conciliación", value=pd.to_datetime("2026-08-01"))
     periodo_fmt = periodo.strftime('%m/%Y')
     st.divider()
-    st.info("💡 **Sistema Adaptativo:** Soporta formatos de SII, ERPs, bancos y carteras de facturas.")
 
 st.title("📊 Panel de Conciliación y Control de Cuentas")
 st.markdown(f"**Cliente:** `{empresa}` | **Período:** `{periodo_fmt}`")
@@ -468,7 +469,7 @@ with tab1:
             with col_kpi:
                 st.metric("Total Ingresos Confirmados", f"$ {total_ingresos:,.0f}".replace(",", "."))
             with col_info:
-                st.success(f"¡Cartola procesada correctamente! Se identificaron **{len(df_cartola_global)}** abonos válidos.")
+                st.success(f"¡Cartola procesada! Se identificaron **{len(df_cartola_global)}** abonos válidos.")
 
             st.divider()
             
@@ -479,8 +480,8 @@ with tab1:
                 )
 
             if df_incompletos_global is not None and not df_incompletos_global.empty:
-                st.warning(f"⚠️ **Atención:** Se detectaron **{len(df_incompletos_global)}** fila(s) para revisión manual.")
-                with st.expander("🔍 Ver transacciones para revisión manual", expanded=False):
+                st.warning(f"⚠️ **Atención:** Se detectaron **{len(df_incompletos_global)}** fila(s) incompletas que requieren revisión manual.")
+                with st.expander("🔍 Ver filas incompletas o ambiguas para revisión manual", expanded=True):
                     st.dataframe(df_incompletos_global, use_container_width=True, hide_index=True)
         else:
             st.error(f"Error: {estado_cartola}")
@@ -497,7 +498,7 @@ with tab2:
             with col_kpi_v:
                 st.metric("Total Ventas / Cartera", f"$ {total_ventas:,.0f}".replace(",", "."))
             with col_info_v:
-                st.success(f"¡Documentos procesados correctamente! Se cargaron **{len(df_ventas_global)}** registros.")
+                st.success(f"¡Documentos procesados! Se cargaron **{len(df_ventas_global)}** registros con sus números de folio y montos.")
 
             st.divider()
 
@@ -511,9 +512,7 @@ with tab2:
     else:
         st.info("Sube el registro de ventas o cartera de documentos en la sección superior.")
 
-# ---------------------------------------------------------
-# TAB 3: CRUCE Y CONCILIACIÓN
-# ---------------------------------------------------------
+# TAB 3: CRUCE
 df_cruce_global = pd.DataFrame()
 df_pendientes_global = pd.DataFrame()
 
@@ -554,13 +553,10 @@ with tab3:
                 use_container_width=True,
                 hide_index=True
             )
-
     else:
-        st.info("⚠️ Para ejecutar el cruce automático, debes subir **ambos archivos**: la Cartola Bancaria y el Registro de Ventas.")
+        st.info("⚠️ Sube la Cartola Bancaria y el Registro de Ventas para ver el cruce automático.")
 
-# ---------------------------------------------------------
-# 3. SECCIÓN DE EXPORTACIÓN
-# ---------------------------------------------------------
+# EXPORTACIÓN
 if not df_cartola_global.empty or df_ventas_global is not None:
     st.divider()
     st.subheader("📥 Exportar Informe Completo")
@@ -590,4 +586,3 @@ if not df_cartola_global.empty or df_ventas_global is not None:
                 mime="text/csv",
                 use_container_width=True
             )
-
