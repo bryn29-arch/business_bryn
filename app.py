@@ -68,18 +68,18 @@ st.markdown("""
 
 
 # ---------------------------------------------------------
-# FUNCIONES AUXILIARES DE EXTRACCIÓN (MEJORADAS)
+# FUNCIONES AUXILIARES DE EXTRACCIÓN
 # ---------------------------------------------------------
 
 def extraer_rut_o_nombre(texto):
     """
     Detecta RUTs (estándar, sin guión o dentro de 'Pago Proveedores')
-    o Nombres/Razones Sociales en glosas bancarias.
+    o Nombres/Razones Sociales en glosas bancarias y archivos.
     """
     if not isinstance(texto, str) or not texto.strip():
         return "NO_DETECTADO"
 
-    # 1. Pago Proveedores con RUT de 9 o 10 dígitos pegado (ej: 0966910607 -> 96.691.060-7 o 093546000k -> 93.546.000-K)
+    # 1. Pago Proveedores con RUT de 9 o 10 dígitos pegado (ej: 0966910607 -> 96.691.060-7)
     match_prov = re.search(r'Pago:\s*Proveedores\s+0?(\d{7,8})([\dkK])\b', texto, re.IGNORECASE)
     if match_prov:
         body, dv = match_prov.group(1), match_prov.group(2).upper()
@@ -123,11 +123,11 @@ def extraer_monto_chileno_estricto(texto_o_celda):
 
     texto = str(texto_o_celda).strip()
 
-    # Limpiamos bloques que corresponden a RUTs o identificadores numéricos de proveedores
+    # Limpiamos bloques que corresponden a RUTs o identificadores numéricos
     texto_limpio = re.sub(r'\b\d{7,8}-[\dkK]\b', '', texto)
     texto_limpio = re.sub(r'Pago:\s*Proveedores\s+\d+[\dkK]?', '', texto_limpio, flags=re.IGNORECASE)
 
-    # 1. Buscar montos con comas o puntos como separadores de miles (ej: 3,694,950 o 3.694.950)
+    # 1. Buscar montos con comas o puntos como separadores de miles
     coincidencias = re.findall(r'\b\d{1,3}(?:[.,]\d{3})+\b', texto_limpio)
     if coincidencias:
         monto_str = coincidencias[-1].replace('.', '').replace(',', '')
@@ -167,7 +167,7 @@ def extraer_monto_chileno_estricto(texto_o_celda):
 # ---------------------------------------------------------
 
 def normalizar_cartola(archivo_subido):
-    """Procesa cartolas bancarias reconociendo depósitos válidos y separando ambiguos."""
+    """Procesa cartolas bancarias reconociendo depósitos válidos."""
     nombre_archivo = archivo_subido.name.lower()
     registros_ok = []
     registros_dudosos = []
@@ -266,11 +266,11 @@ def normalizar_cartola(archivo_subido):
 
 
 # ---------------------------------------------------------
-# PROCESAMIENTO DE REGISTRO DE VENTAS / CARTERA
+# PROCESAMIENTO DE REGISTRO DE VENTAS (ESTRUCTURA UNIFICADA RUT 1 / RUT 2)
 # ---------------------------------------------------------
 
 def normalizar_ventas(archivo_subido):
-    """Procesa el Registro/Cartera reconociendo deudor (pagador) y cliente (emisor)."""
+    """Procesa el Registro/Cartera identificando de forma agnóstica RUT 1, Nombre 1, RUT 2, Nombre 2."""
     nombre_archivo = archivo_subido.name.lower()
     try:
         if nombre_archivo.endswith(('.xlsx', '.xls')):
@@ -288,9 +288,9 @@ def normalizar_ventas(archivo_subido):
 
         # Detectar encabezados
         header_row_idx = None
-        for idx in range(min(10, len(df_raw))):
+        for idx in range(min(12, len(df_raw))):
             row_str = " ".join([str(val).lower() for val in df_raw.iloc[idx].values if pd.notna(val)])
-            if any(k in row_str for k in ['deudor', 'clte', 'cliente', 'nro.docto', 'v. docto.']):
+            if any(k in row_str for k in ['deudor', 'clte', 'cliente', 'receptor', 'nro.docto', 'v. docto.', 'folio', 'rut', 'razon social']):
                 header_row_idx = idx
                 break
 
@@ -299,33 +299,49 @@ def normalizar_ventas(archivo_subido):
             df_raw = df_raw.iloc[header_row_idx + 1:].copy()
             df_raw.columns = new_headers
 
-        df_raw.columns = [str(c).strip() for c in df_raw.columns]
+        cols_clean = {c: str(c).strip() for c in df_raw.columns if pd.notna(c)}
+        df_raw = df_raw.rename(columns=cols_clean)
 
-        col_rut_deudor = next((c for c in df_raw.columns if c.lower() in ['rut. deudor', 'rut_deudor', 'rut deudor', 'rut pagador']), None)
-        col_nom_deudor = next((c for c in df_raw.columns if c.lower() in ['nombre deudor', 'nombre_deudor', 'deudor', 'pagador']), None)
-        
-        col_rut_cliente = next((c for c in df_raw.columns if c.lower() in ['rut. clte', 'rut_clte', 'rut clte', 'rut cliente', 'rut. cliente']), None)
-        col_nom_cliente = next((c for c in df_raw.columns if c.lower() in ['nombre cliente', 'nombre_cliente', 'cliente', 'emisor']), None)
+        # Detectar columnas de Folio y Monto
+        col_folio = next((c for c in df_raw.columns if any(k in c.lower() for k in [
+            'folio', 'nro.docto', 'nro_docto', 'nro factura', 'factura', 'numero', 'docto', 'num'
+        ])), None)
 
-        col_folio = next((c for c in df_raw.columns if c.lower() in ['nro.docto', 'nro_docto', 'folio', 'nro_factura', 'factura', 'numero']), None)
-        col_monto = next((c for c in df_raw.columns if c.lower() in ['v. docto.', 'v_docto', 'v. docto', 'v.adeudado', 'monto_total', 'total']), None)
+        col_monto = next((c for c in df_raw.columns if any(k in c.lower() for k in [
+            'v. docto.', 'v_docto', 'v. docto', 'v.adeudado', 'monto_total', 'total', 'monto', 'saldo', 'monto total'
+        ])), None)
+
+        # Detectar todas las columnas que contengan RUT y Nombres
+        rut_cols = [c for c in df_raw.columns if 'rut' in c.lower()]
+        nom_cols = [c for c in df_raw.columns if any(k in c.lower() for k in ['nombre', 'razon', 'razón', 'social', 'cliente', 'deudor', 'receptor', 'emisor', 'pagador']) and c not in rut_cols]
 
         df_final = pd.DataFrame()
 
+        # Folio
         df_final['Folio'] = df_raw[col_folio].astype(str).str.replace(r'\.0$', '', regex=True).str.strip() if col_folio else [f"F-{i+1}" for i in range(len(df_raw))]
-        
-        # Deudor (Pagador)
-        df_final['RUT Deudor (Pagador)'] = df_raw[col_rut_deudor].astype(str).apply(lambda x: extraer_rut_o_nombre(x) if 'NO_DETECTADO' not in extraer_rut_o_nombre(x) else str(x).strip().upper()) if col_rut_deudor else "S/RUT"
-        df_final['Nombre Deudor'] = df_raw[col_nom_deudor].astype(str).str.strip() if col_nom_deudor else "DEUDOR DESCONOCIDO"
 
-        # Cliente (Emisor)
-        df_final['RUT Cliente (Emisor)'] = df_raw[col_rut_cliente].astype(str).apply(lambda x: extraer_rut_o_nombre(x) if 'NO_DETECTADO' not in extraer_rut_o_nombre(x) else str(x).strip().upper()) if col_rut_cliente else "S/RUT"
-        df_final['Nombre Cliente'] = df_raw[col_nom_cliente].astype(str).str.strip() if col_nom_cliente else "CLIENTE DESCONOCIDO"
+        # RUT 1 y Nombre 1
+        if len(rut_cols) >= 1:
+            df_final['RUT 1'] = df_raw[rut_cols[0]].astype(str).apply(lambda x: extraer_rut_o_nombre(x) if 'NO_DETECTADO' not in extraer_rut_o_nombre(x) else str(x).strip().upper())
+        else:
+            df_final['RUT 1'] = "S/RUT"
 
-        # Monto
+        if len(nom_cols) >= 1:
+            df_final['Nombre 1'] = df_raw[nom_cols[0]].astype(str).str.strip().str.upper()
+        else:
+            df_final['Nombre 1'] = "N/A"
+
+        # RUT 2 y Nombre 2 (Si existen)
+        if len(rut_cols) >= 2:
+            df_final['RUT 2'] = df_raw[rut_cols[1]].astype(str).apply(lambda x: extraer_rut_o_nombre(x) if 'NO_DETECTADO' not in extraer_rut_o_nombre(x) else str(x).strip().upper())
+            df_final['Nombre 2'] = df_raw[nom_cols[1]].astype(str).str.strip().str.upper() if len(nom_cols) >= 2 else "N/A"
+            cols_ordenadas = ['Folio', 'RUT 1', 'Nombre 1', 'RUT 2', 'Nombre 2', 'Monto Total']
+        else:
+            cols_ordenadas = ['Folio', 'RUT 1', 'Nombre 1', 'Monto Total']
+
+        # Monto Total
         df_final['Monto Total'] = df_raw[col_monto].apply(lambda x: extraer_monto_chileno_estricto(x) or 0) if col_monto else 0
 
-        cols_ordenadas = ['Folio', 'RUT Deudor (Pagador)', 'Nombre Deudor', 'RUT Cliente (Emisor)', 'Nombre Cliente', 'Monto Total']
         return df_final[cols_ordenadas].reset_index(drop=True), "OK"
 
     except Exception as e:
@@ -333,11 +349,11 @@ def normalizar_ventas(archivo_subido):
 
 
 # ---------------------------------------------------------
-# CONCILIACIÓN MULTINIVEL FLEXIBLE
+# CONCILIACIÓN AUTOMÁTICA UNIFICADA
 # ---------------------------------------------------------
 
 def conciliar_informacion_flexible(df_cartola, df_ventas):
-    """Conciliación multinivel apta para Factoring, Cobranzas y Empresas de Servicios."""
+    """Conciliación automática buscando coincidencias en RUT 1, RUT 2, Nombre 1 o Nombre 2."""
     if df_cartola.empty or df_ventas is None or df_ventas.empty:
         return pd.DataFrame(), pd.DataFrame()
 
@@ -351,31 +367,31 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
         coincidencias = pd.DataFrame()
         criterio_encontrado = ""
 
-        # Nivel 1: RUT Deudor
-        if 'RUT Deudor (Pagador)' in df_ventas.columns:
-            coincidencias = df_ventas[df_ventas['RUT Deudor (Pagador)'].str.upper() == id_cartola]
+        # Coincidencia 1: RUT 1
+        if 'RUT 1' in df_ventas.columns:
+            coincidencias = df_ventas[df_ventas['RUT 1'].str.upper() == id_cartola]
             if not coincidencias.empty:
-                criterio_encontrado = "RUT Deudor"
+                criterio_encontrado = "RUT 1"
 
-        # Nivel 2: RUT Cliente
-        if coincidencias.empty and 'RUT Cliente (Emisor)' in df_ventas.columns:
-            coincidencias = df_ventas[df_ventas['RUT Cliente (Emisor)'].str.upper() == id_cartola]
+        # Coincidencia 2: RUT 2 (Si existe)
+        if coincidencias.empty and 'RUT 2' in df_ventas.columns:
+            coincidencias = df_ventas[df_ventas['RUT 2'].str.upper() == id_cartola]
             if not coincidencias.empty:
-                criterio_encontrado = "RUT Cliente"
+                criterio_encontrado = "RUT 2"
 
-        # Nivel 3: Nombre Deudor
-        if coincidencias.empty and 'Nombre Deudor' in df_ventas.columns and len(id_cartola) > 3:
-            coincidencias = df_ventas[df_ventas['Nombre Deudor'].str.upper().str.contains(id_cartola, regex=False, na=False)]
+        # Coincidencia 3: Nombre 1
+        if coincidencias.empty and 'Nombre 1' in df_ventas.columns and len(id_cartola) > 3:
+            coincidencias = df_ventas[df_ventas['Nombre 1'].str.upper().str.contains(id_cartola, regex=False, na=False)]
             if not coincidencias.empty:
-                criterio_encontrado = "Nombre Deudor"
+                criterio_encontrado = "Nombre 1"
 
-        # Nivel 4: Nombre Cliente
-        if coincidencias.empty and 'Nombre Cliente' in df_ventas.columns and len(id_cartola) > 3:
-            coincidencias = df_ventas[df_ventas['Nombre Cliente'].str.upper().str.contains(id_cartola, regex=False, na=False)]
+        # Coincidencia 4: Nombre 2
+        if coincidencias.empty and 'Nombre 2' in df_ventas.columns and len(id_cartola) > 3:
+            coincidencias = df_ventas[df_ventas['Nombre 2'].str.upper().str.contains(id_cartola, regex=False, na=False)]
             if not coincidencias.empty:
-                criterio_encontrado = "Nombre Cliente"
+                criterio_encontrado = "Nombre 2"
 
-        # Procesar coincidencia
+        # Evaluar resultado del Match
         if not coincidencias.empty:
             match_exacto = coincidencias[coincidencias['Monto Total'] == monto_pago]
             
@@ -387,7 +403,7 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
                     'Identificador Cartola': id_cartola,
                     'Monto Banco ($)': monto_pago,
                     'Folio Factura': f_row['Folio'],
-                    'Entidad Matcheada': f_row.get('Nombre Deudor', f_row.get('Nombre Cliente', 'N/A')),
+                    'Entidad Matcheada': f_row.get('Nombre 1', 'N/A'),
                     'Match Por': criterio_encontrado,
                     'Monto Factura ($)': f_row['Monto Total'],
                     'Diferencia ($)': 0,
@@ -402,7 +418,7 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
                     'Identificador Cartola': id_cartola,
                     'Monto Banco ($)': monto_pago,
                     'Folio Factura': f_row['Folio'],
-                    'Entidad Matcheada': f_row.get('Nombre Deudor', f_row.get('Nombre Cliente', 'N/A')),
+                    'Entidad Matcheada': f_row.get('Nombre 1', 'N/A'),
                     'Match Por': criterio_encontrado,
                     'Monto Factura ($)': f_row['Monto Total'],
                     'Diferencia ($)': dif,
@@ -535,7 +551,7 @@ with tab2:
             with col_kpi_v:
                 st.metric("Total Ventas / Cartera", f"$ {total_ventas:,.0f}".replace(",", "."))
             with col_info_v:
-                st.success(f"¡Documentos procesados! Se cargaron **{len(df_ventas_global)}** registros con sus números de folio y montos.")
+                st.success(f"¡Documentos procesados! Se cargaron **{len(df_ventas_global)}** registros de forma limpia.")
 
             st.divider()
 
@@ -623,3 +639,4 @@ if not df_cartola_global.empty or df_ventas_global is not None:
                 mime="text/csv",
                 use_container_width=True
             )
+
