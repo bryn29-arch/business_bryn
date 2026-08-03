@@ -128,7 +128,7 @@ for idx_c, row_c in df_cartola.iterrows():
             for r in range(1, min(15, len(indices_cand_rut) + 1)):
                 for combo in combinations(indices_cand_rut, r):
                     suma_combo = sum(
-                        df_ventas_prep.loc[i, 'Fila_Montos'][0] 
+                       obtener_monto_principal(df_ventas_prep.loc[i, 'Fila_Montos'])
                         for i in combo if df_ventas_prep.loc[i, 'Fila_Montos']
                     )
                     if abs(monto_banco - suma_combo) < 1.0:
@@ -167,7 +167,7 @@ for idx_c, row_c in df_cartola.iterrows():
             for r in range(2, min(8, len(candidatos_cliente) + 1)):
                 for combo in combinations(candidatos_cliente, r):
                     suma_combo = sum(
-                        df_ventas_prep.loc[i, 'Fila_Montos'][0] 
+                       obtener_monto_principal(df_ventas_prep.loc[i, 'Fila_Montos'])
                         for i in combo if df_ventas_prep.loc[i, 'Fila_Montos']
                     )
                     if abs(monto_banco - suma_combo) < 1.0:
