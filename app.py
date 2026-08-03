@@ -18,12 +18,26 @@ st.set_page_config(
 # -----------------------------------------------------------------------------
 
 def super_limpiar(texto):
-    """Normaliza y comprime cadenas eliminando acentos, espacios y caracteres especiales."""
+    """
+    Normaliza y comprime cadenas eliminando acentos, espacios, puntos y caracteres especiales.
+    """
     if not isinstance(texto, str) or pd.isna(texto):
         return ""
+    # Quitar acentos / diacríticos
     texto = unicodedata.normalize('NFD', str(texto)).encode('ascii', 'ignore').decode("utf-8")
+    # Convertir a mayúsculas y dejar solo letras y números
     texto = re.sub(r'[^A-Z0-9]', '', texto.upper())
     return texto
+
+def obtener_palabras_clave(texto):
+    """Extrae palabras de más de 2 caracteres para cruce por tokens."""
+    if not isinstance(texto, str) or pd.isna(texto):
+        return set()
+    texto_norm = unicodedata.normalize('NFD', str(texto)).encode('ascii', 'ignore').decode("utf-8").upper()
+    palabras = re.findall(r'\b[A-Z0-9]{3,}\b', texto_norm)
+    # Filtrar palabras comunes de transferencias que generan falsos positivos
+    stopwords = {'TRASPASO', 'TRANSFERENCIA', 'BANCO', 'PAGO', 'DEBITO', 'CREDITO', 'VALE', 'VISTA', 'INVERSIONES', 'CHILE'}
+    return set(p for p in palabras if p not in stopwords)
 
 def limpiar_monto(val):
     """Convierte cualquier formato monetario (str, int, float) a float limpio."""
@@ -32,10 +46,8 @@ def limpiar_monto(val):
     if isinstance(val, (int, float)):
         return float(val)
     
-    # Limpiar cadenas con formato $ X.XXX.XXX,XX o $ X,XXX,XXX.XX
     val_str = str(val).strip().replace('$', '').replace(' ', '')
     if ',' in val_str and '.' in val_str:
-        # Asume punto de miles y coma decimal
         if val_str.rfind('.') < val_str.rfind(','):
             val_str = val_str.replace('.', '').replace(',', '.')
         else:
@@ -50,13 +62,13 @@ def limpiar_monto(val):
         return 0.0
 
 def calcular_similitud(s1, s2):
-    """Retorna un porcentaje de similitud entre dos cadenas superlimpias."""
+    """Retorna porcentaje de similitud entre dos cadenas (0.0 a 1.0)."""
     if not s1 or not s2:
         return 0.0
     return SequenceMatcher(None, s1, s2).ratio()
 
 # -----------------------------------------------------------------------------
-# ALGORITMO DE CONCILIACIÓN
+# ALGORITMO DE CONCILIACIÓN EXTENDIDO
 # -----------------------------------------------------------------------------
 
 @st.cache_data
@@ -69,44 +81,45 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
 
     df_ventas_prep = df_ventas.copy()
     
-    # Detección dinámica de columna de cliente
-    col_cliente_ventas = next((col for col in ['Nombre 2', 'Nombre Cliente', 'Cliente', 'Razon Social'] if col in df_ventas_prep.columns), df_ventas_prep.columns[0])
+    # 1. Detección inteligente de columnas en Ventas
+    col_cliente_v = next((c for c in ['Nombre 2', 'Nombre Cliente', 'Cliente', 'Razon Social', 'Nombre'] if c in df_ventas_prep.columns), df_ventas_prep.columns[0])
+    col_monto_v = next((c for c in ['Monto Total', 'Monto', 'Total', 'Valor'] if c in df_ventas_prep.columns), None)
+    col_folio_v = next((c for c in ['Folio', 'N° Factura', 'Numero', 'Factura', 'ID'] if c in df_ventas_prep.columns), None)
     
-    # Detección dinámica de columna de monto en ventas
-    col_monto_ventas = next((col for col in ['Monto Total', 'Monto', 'Total'] if col in df_ventas_prep.columns), None)
-    
-    # Detección dinámica de Folio
-    col_folio_ventas = next((col for col in ['Folio', 'N° Factura', 'Numero', 'Factura'] if col in df_ventas_prep.columns), None)
-    if not col_folio_ventas:
-        df_ventas_prep['Folio_Auto'] = df_ventas_prep.index + 1
-        col_folio_ventas = 'Folio_Auto'
+    if not col_folio_v:
+        df_ventas_prep['Folio_Auto'] = [f"DOC-{i+1}" for i in range(len(df_ventas_prep))]
+        col_folio_v = 'Folio_Auto'
 
-    # Crear columna combinada si existe
+    # Unificar texto de toda la fila para maximizar coincidencias
     if 'Texto_Fila_Completo' not in df_ventas_prep.columns:
         df_ventas_prep['Texto_Fila_Completo'] = df_ventas_prep.astype(str).agg(' '.join, axis=1)
 
     df_ventas_prep['Texto_Super_Limpio'] = df_ventas_prep['Texto_Fila_Completo'].apply(super_limpiar)
-    df_ventas_prep['Nombre_Super_Limpio'] = df_ventas_prep[col_cliente_ventas].apply(super_limpiar)
-    df_ventas_prep['Monto_Limpio'] = df_ventas_prep[col_monto_ventas].apply(limpiar_monto)
+    df_ventas_prep['Nombre_Super_Limpio'] = df_ventas_prep[col_cliente_v].apply(super_limpiar)
+    df_ventas_prep['Monto_Limpio'] = df_ventas_prep[col_monto_v].apply(limpiar_monto)
+    df_ventas_prep['Tokens_Nombre'] = df_ventas_prep[col_cliente_v].apply(obtener_palabras_clave)
 
-    # Identificar columnas de Cartola
-    col_glosa_cartola = next((col for col in ['Descripción Glosa', 'Descripción', 'Descripcion', 'Glosa', 'Detalle'] if col in df_cartola.columns), df_cartola.columns[0])
-    col_monto_cartola = next((col for col in ['Monto Pago', 'Monto', 'Abono', 'Monto Banco ($)'] if col in df_cartola.columns), None)
+    # 2. Detección inteligente de columnas en Cartola
+    col_glosa_c = next((c for c in ['Descripción Glosa', 'Descripción', 'Descripcion', 'Glosa', 'Detalle'] if c in df_cartola.columns), df_cartola.columns[0])
+    col_monto_c = next((c for c in ['Monto Pago', 'Monto', 'Abono', 'Monto Banco ($)', 'Credito'] if c in df_cartola.columns), None)
 
     for idx_c, row_c in df_cartola.iterrows():
-        glosa_raw = str(row_c.get(col_glosa_cartola, ''))
+        glosa_raw = str(row_c.get(col_glosa_c, ''))
         identificador_raw = str(row_c.get('Identificador / Cliente', glosa_raw))
-        monto_pago = limpiar_monto(row_c.get(col_monto_cartola, 0.0))
+        monto_pago = limpiar_monto(row_c.get(col_monto_c, 0.0))
 
         glosa_clean = super_limpiar(glosa_raw)
         identificador_clean = super_limpiar(identificador_raw)
+        tokens_cartola = obtener_palabras_clave(glosa_raw)
 
-        ventas_disponibles = df_ventas_prep[~df_ventas_prep[col_folio_ventas].isin(facturas_usadas)].copy()
+        ventas_disponibles = df_ventas_prep[~df_ventas_prep[col_folio_v].isin(facturas_usadas)].copy()
 
         match_encontrado = None
         tipo_match = "Sin Coincidencia"
 
-        # ESTRATEGIA 1: Cliente/Glosa Coincide + Monto Exacto
+        # -------------------------------------------------------------
+        # ESTRATEGIA 1: Cliente/Glosa Coincide (Compresión Exakta) + Monto Exacto
+        # -------------------------------------------------------------
         for idx_v, row_v in ventas_disponibles.iterrows():
             nombre_v_clean = row_v['Nombre_Super_Limpio']
             texto_v_clean = row_v['Texto_Super_Limpio']
@@ -117,7 +130,7 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
                 (nombre_v_clean and nombre_v_clean in glosa_clean) or
                 (identificador_clean and nombre_v_clean and identificador_clean in nombre_v_clean) or
                 (nombre_v_clean and identificador_clean and nombre_v_clean in identificador_clean) or
-                calcular_similitud(identificador_clean, nombre_v_clean) > 0.70
+                calcular_similitud(identificador_clean, nombre_v_clean) > 0.65
             )
 
             if coincide_nombre and abs(monto_pago - monto_v) < 1.0:
@@ -125,7 +138,23 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
                 tipo_match = "Cliente + Monto Exacto"
                 break
 
-        # ESTRATEGIA 2: Monto Exacto (Ranking por Nombre)
+        # -------------------------------------------------------------
+        # ESTRATEGIA 2: Coincidencia por Tokens/Palabras Clave + Monto Exacto
+        # -------------------------------------------------------------
+        if match_encontrado is None and tokens_cartola:
+            for idx_v, row_v in ventas_disponibles.iterrows():
+                tokens_v = row_v['Tokens_Nombre']
+                monto_v = row_v['Monto_Limpio']
+
+                # Si comparten al menos 1 palabra clave significativa y el monto es exacto
+                if tokens_cartola.intersection(tokens_v) and abs(monto_pago - monto_v) < 1.0:
+                    match_encontrado = row_v
+                    tipo_match = "Palabra Clave + Monto Exacto"
+                    break
+
+        # -------------------------------------------------------------
+        # ESTRATEGIA 3: Coincidencia por Monto Exacto (Ranking por Nombre)
+        # -------------------------------------------------------------
         if match_encontrado is None:
             match_monto = ventas_disponibles[abs(ventas_disponibles['Monto_Limpio'] - monto_pago) < 1.0]
             if not match_monto.empty:
@@ -136,16 +165,20 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
                 match_encontrado = match_monto.sort_values(by='similitud', ascending=False).iloc[0]
                 tipo_match = "Monto Exacto (Revisar Nombre)"
 
-        # ESTRATEGIA 3: Cliente Coincide pero con Diferencia de Monto
+        # -------------------------------------------------------------
+        # ESTRATEGIA 4: Cliente Coincide pero con Diferencia de Monto
+        # -------------------------------------------------------------
         if match_encontrado is None:
             candidatos_nombre = []
             for idx_v, row_v in ventas_disponibles.iterrows():
                 nombre_v_clean = row_v['Nombre_Super_Limpio']
                 texto_v_clean = row_v['Texto_Super_Limpio']
+                tokens_v = row_v['Tokens_Nombre']
 
                 if (identificador_clean and identificador_clean in texto_v_clean) or \
                    (nombre_v_clean and nombre_v_clean in glosa_clean) or \
-                   calcular_similitud(identificador_clean, nombre_v_clean) > 0.70:
+                   (tokens_cartola and tokens_cartola.intersection(tokens_v)) or \
+                   calcular_similitud(identificador_clean, nombre_v_clean) > 0.65:
                     candidatos_nombre.append(row_v)
 
             if candidatos_nombre:
@@ -154,9 +187,11 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
                 match_encontrado = df_cand.sort_values(by='dif_abs').iloc[0]
                 tipo_match = "Cliente Coincide (Diferencia Monto)"
 
+        # -------------------------------------------------------------
         # REGISTRO DE RESULTADOS
+        # -------------------------------------------------------------
         if match_encontrado is not None:
-            facturas_usadas.add(match_encontrado[col_folio_ventas])
+            facturas_usadas.add(match_encontrado[col_folio_v])
             monto_factura = float(match_encontrado['Monto_Limpio'])
             dif = monto_pago - monto_factura
 
@@ -168,8 +203,8 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
             cruce_list.append({
                 'Identificador Cartola': identificador_raw,
                 'Monto Banco ($)': monto_pago,
-                'Folios Factura(s)': match_encontrado[col_folio_ventas],
-                'Entidad Matcheada': match_encontrado[col_cliente_ventas],
+                'Folios Factura(s)': match_encontrado[col_folio_v],
+                'Entidad Matcheada': match_encontrado[col_cliente_v],
                 'Match Por': tipo_match,
                 'Monto Factura ($)': monto_factura,
                 'Diferencia ($)': dif,
@@ -188,7 +223,7 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
             })
 
     df_cruce = pd.DataFrame(cruce_list)
-    ventas_pendientes = df_ventas_prep[~df_ventas_prep[col_folio_ventas].isin(facturas_usadas)].copy()
+    ventas_pendientes = df_ventas_prep[~df_ventas_prep[col_folio_v].isin(facturas_usadas)].copy()
     if not ventas_pendientes.empty:
         ventas_pendientes['Estado'] = '🔵 Documento Pendiente de Pago'
 
@@ -199,7 +234,7 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
 # -----------------------------------------------------------------------------
 
 st.title("🏦 Sistema de Conciliación Bancaria Inteligente")
-st.markdown("Carga tus archivos de **Cartola Bancaria** y **Registro de Ventas/Cobranzas** para ejecutar el cruce automático con coincidencia flexible.")
+st.markdown("Carga tus archivos de **Cartola Bancaria** y **Registro de Ventas/Cobranzas** para ejecutar el cruce automático.")
 
 col1, col2 = st.columns(2)
 
