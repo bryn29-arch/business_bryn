@@ -72,22 +72,26 @@ st.markdown("""
 # FUNCIONES AUXILIARES DE EXTRACCIÓN Y LIMPIEZA
 # ---------------------------------------------------------
 
+def normalizar_rut_clave(rut_str):
+    """Limpia el RUT dejando solo números y K para comparaciones 100% exactas."""
+    if not isinstance(rut_str, str) or not rut_str.strip():
+        return ""
+    rut_clean = re.sub(r'[^0-9Kk]', '', rut_str).upper()
+    return rut_clean
+
+
 def limpiar_texto_para_match(texto):
-    """Limpia un texto/nombre quitando espacios, puntos, comas y siglas jurídicas."""
     if not isinstance(texto, str) or not texto.strip():
         return ""
-    
     t = texto.upper()
     siglas = [r'\bS\.?A\.?\b', r'\bS\.?P\.?A\.?\b', r'\bLTDA\.?\b', r'\bLIMITADA\b', r'\bE\.?I\.?R\.?L\.?\b']
     for sigla in siglas:
         t = re.sub(sigla, '', t)
-        
     t = re.sub(r'[^A-Z0-9]', '', t)
     return t.strip()
 
 
 def extraer_rut_o_nombre(texto):
-    """Detecta RUTs o Nombres/Razones Sociales en glosas bancarias."""
     if not isinstance(texto, str) or not texto.strip():
         return "NO_DETECTADO"
 
@@ -118,7 +122,6 @@ def extraer_rut_o_nombre(texto):
 
 
 def extraer_monto_chileno_estricto(texto_o_celda):
-    """Extrae montos numéricos soportando comas o puntos como separadores de miles."""
     if pd.isna(texto_o_celda) or str(texto_o_celda).strip() in ['', 'None', 'nan', '0']:
         return None
 
@@ -162,8 +165,8 @@ def extraer_monto_chileno_estricto(texto_o_celda):
     return None
 
 
-def buscar_combinacion_facturas(df_cliente, monto_pago, max_facturas=4):
-    """Busca ultra rápido si la suma de hasta 4 facturas del cliente cuadra exacto."""
+def buscar_combinacion_facturas(df_cliente, monto_pago, max_facturas=3):
+    """Algoritmo de cuadratura 1:N optimizado."""
     if df_cliente.empty:
         return pd.DataFrame()
         
@@ -171,7 +174,11 @@ def buscar_combinacion_facturas(df_cliente, monto_pago, max_facturas=4):
     montos = df_cliente['Monto Total'].tolist()
     n = len(montos)
     
-    # Probar combinaciones rápidas de 2 a max_facturas
+    if n > 12:
+        folios = folios[:12]
+        montos = montos[:12]
+        n = 12
+
     for r in range(2, min(n + 1, max_facturas + 1)):
         for indices in combinations(range(n), r):
             suma_grupo = sum(montos[i] for i in indices)
@@ -183,12 +190,11 @@ def buscar_combinacion_facturas(df_cliente, monto_pago, max_facturas=4):
 
 
 # ---------------------------------------------------------
-# PROCESAMIENTO DE CARTOLA BANCARIA
+# PROCESAMIENTO Y CRUCE CON CACHÉ DE STREAMLIT
 # ---------------------------------------------------------
 
-def normalizar_cartola(archivo_subido):
-    """Procesa cartolas bancarias leyendo hojas continuas sin descartar movimientos idénticos."""
-    nombre_archivo = archivo_subido.name.lower()
+@st.cache_data(show_spinner=False)
+def normalizar_cartola_cached(file_bytes, nombre_archivo):
     registros_ok = []
     registros_dudosos = []
 
@@ -200,7 +206,7 @@ def normalizar_cartola(archivo_subido):
 
     try:
         if nombre_archivo.endswith('.pdf'):
-            with pdfplumber.open(archivo_subido) as pdf:
+            with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
                 for num_pag, pagina in enumerate(pdf.pages, start=1):
                     texto_pag = pagina.extract_text() or ""
                     lineas_texto = [l.strip() for l in texto_pag.split('\n') if l.strip()]
@@ -250,7 +256,7 @@ def normalizar_cartola(archivo_subido):
                                 })
 
         elif nombre_archivo.endswith(('.xlsx', '.xls', '.csv')):
-            df_raw = pd.read_excel(archivo_subido) if nombre_archivo.endswith(('.xlsx', '.xls')) else pd.read_csv(archivo_subido)
+            df_raw = pd.read_excel(io.BytesIO(file_bytes)) if nombre_archivo.endswith(('.xlsx', '.xls')) else pd.read_csv(io.BytesIO(file_bytes))
             for idx, row in df_raw.iterrows():
                 texto_fila = " ".join([str(v) for v in row.values if pd.notna(v)])
                 m = extraer_monto_chileno_estricto(texto_fila)
@@ -275,21 +281,16 @@ def normalizar_cartola(archivo_subido):
         return pd.DataFrame(), pd.DataFrame(), f"Error al procesar cartola: {str(e)}"
 
 
-# ---------------------------------------------------------
-# PROCESAMIENTO DE REGISTRO DE VENTAS
-# ---------------------------------------------------------
-
-def normalizar_ventas(archivo_subido):
-    """Procesa el Registro/Cartera identificando Folio, RUT y Nombre de cliente."""
-    nombre_archivo = archivo_subido.name.lower()
+@st.cache_data(show_spinner=False)
+def normalizar_ventas_cached(file_bytes, nombre_archivo):
     try:
         if nombre_archivo.endswith(('.xlsx', '.xls')):
-            df_raw = pd.read_excel(archivo_subido)
+            df_raw = pd.read_excel(io.BytesIO(file_bytes))
         elif nombre_archivo.endswith('.csv'):
             try:
-                df_raw = pd.read_csv(archivo_subido)
+                df_raw = pd.read_csv(io.BytesIO(file_bytes))
             except Exception:
-                df_raw = pd.read_csv(archivo_subido, sep=';', encoding='latin1')
+                df_raw = pd.read_csv(io.BytesIO(file_bytes), sep=';', encoding='latin1')
         else:
             return None, "Formato de archivo no soportado."
 
@@ -389,61 +390,60 @@ def normalizar_ventas(archivo_subido):
 
 
 # ---------------------------------------------------------
-# CONCILIACIÓN AUTOMÁTICA (1 a 1 y 1 a N)
+# LÓGICA DE CONCILIACIÓN MAX-MATCH (REFORZADA)
 # ---------------------------------------------------------
 
-def conciliar_informacion_flexible(df_cartola, df_ventas):
-    """
-    Conciliación flexible soportando 1:1 y 1:N.
-    """
+@st.cache_data(show_spinner=False)
+def conciliar_informacion_flexible_cached(df_cartola, df_ventas):
     if df_cartola.empty or df_ventas is None or df_ventas.empty:
         return pd.DataFrame(), pd.DataFrame()
 
     cruce_list = []
     facturas_usadas = set()
 
+    # Copia de trabajo con columnas clave hiper-normalizadas
+    df_v = df_ventas.copy()
+    df_v['RUT1_Clean'] = df_v['RUT 1'].apply(normalizar_rut_clave) if 'RUT 1' in df_v.columns else ""
+    df_v['RUT2_Clean'] = df_v['RUT 2'].apply(normalizar_rut_clave) if 'RUT 2' in df_v.columns else ""
+    df_v['N1_Limpio'] = df_v['Nombre 1'].apply(limpiar_texto_para_match) if 'Nombre 1' in df_v.columns else ""
+
     for idx_c, row_c in df_cartola.iterrows():
         id_cartola = str(row_c['Identificador / Cliente']).strip().upper()
-        id_cartola_limpio = limpiar_texto_para_match(id_cartola)
+        id_cartola_clean = normalizar_rut_clave(id_cartola)
+        id_cartola_limpio_texto = limpiar_texto_para_match(id_cartola)
         monto_pago = float(row_c['Monto Pago'])
         
-        ventas_disponibles = df_ventas[~df_ventas['Folio'].isin(facturas_usadas)].copy()
+        # Filtrar solo facturas no asignadas previamente
+        ventas_disponibles = df_v[~df_v['Folio'].isin(facturas_usadas)].copy()
         
         candidatos_cliente = pd.DataFrame()
         criterio_cliente = ""
 
-        # 1. Filtrar cliente por RUT 1 / RUT 2 / Nombre
-        if 'RUT 1' in ventas_disponibles.columns:
-            m1 = ventas_disponibles[ventas_disponibles['RUT 1'].str.upper() == id_cartola]
+        # CAPA 1: Match por RUT Normalizado (Ignora puntos, guiones y ceros a la izquierda)
+        if len(id_cartola_clean) >= 7:
+            m1 = ventas_disponibles[ventas_disponibles['RUT1_Clean'] == id_cartola_clean]
             if not m1.empty:
                 candidatos_cliente = m1
                 criterio_cliente = "RUT 1"
+            elif 'RUT2_Clean' in ventas_disponibles.columns:
+                m2 = ventas_disponibles[ventas_disponibles['RUT2_Clean'] == id_cartola_clean]
+                if not m2.empty:
+                    candidatos_cliente = m2
+                    criterio_cliente = "RUT 2"
 
-        if candidatos_cliente.empty and 'RUT 2' in ventas_disponibles.columns:
-            m2 = ventas_disponibles[ventas_disponibles['RUT 2'].str.upper() == id_cartola]
-            if not m2.empty:
-                candidatos_cliente = m2
-                criterio_cliente = "RUT 2"
-
-        if candidatos_cliente.empty and len(id_cartola_limpio) >= 3:
-            if 'Nombre 1' in ventas_disponibles.columns:
-                n1_limpios = ventas_disponibles['Nombre 1'].apply(limpiar_texto_para_match)
-                mask_n1 = n1_limpios.apply(lambda x: id_cartola_limpio in x or x in id_cartola_limpio if len(x) >= 3 else False)
-                if mask_n1.any():
-                    candidatos_cliente = ventas_disponibles[mask_n1]
-                    criterio_cliente = "Nombre 1 (Flex)"
-
-            if candidatos_cliente.empty and 'Nombre 2' in ventas_disponibles.columns:
-                n2_limpios = ventas_disponibles['Nombre 2'].apply(limpiar_texto_para_match)
-                mask_n2 = n2_limpios.apply(lambda x: id_cartola_limpio in x or x in id_cartola_limpio if len(x) >= 3 else False)
-                if mask_n2.any():
-                    candidatos_cliente = ventas_disponibles[mask_n2]
-                    criterio_cliente = "Nombre 2 (Flex)"
+        # CAPA 2: Match por Nombre Flexible (Inclusión mutua de sub-cadenas)
+        if candidatos_cliente.empty and len(id_cartola_limpio_texto) >= 3:
+            mask_n1 = ventas_disponibles['N1_Limpio'].apply(
+                lambda x: (id_cartola_limpio_texto in x or x in id_cartola_limpio_texto) if len(x) >= 3 else False
+            )
+            if mask_n1.any():
+                candidatos_cliente = ventas_disponibles[mask_n1]
+                criterio_cliente = "Nombre Flexible"
 
         match_encontrado = False
 
         if not candidatos_cliente.empty:
-            # Coincidencia exacto 1:1
+            # Match 1:1 Exacto en Monto
             match_exacto_1a1 = candidatos_cliente[candidatos_cliente['Monto Total'] == monto_pago]
             
             if not match_exacto_1a1.empty:
@@ -462,8 +462,8 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
                 })
                 match_encontrado = True
 
-            # Coincidencia 1:N (Suma Agrupada)
             else:
+                # Match 1:N Agrupado (Suma combinada de varias facturas)
                 match_agrupado = buscar_combinacion_facturas(candidatos_cliente, monto_pago)
                 if not match_agrupado.empty:
                     folios_agrupados = ", ".join(match_agrupado['Folio'].astype(str).tolist())
@@ -485,30 +485,30 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
                     })
                     match_encontrado = True
 
-        # Rescate por Monto + Nombre Aprox
-        if not match_encontrado and len(id_cartola_limpio) >= 3:
-            match_por_monto = ventas_disponibles[ventas_disponibles['Monto Total'] == monto_pago]
-            if not match_por_monto.empty:
-                for f_idx, f_row in match_por_monto.iterrows():
-                    n1 = limpiar_texto_para_match(str(f_row.get('Nombre 1', '')))
-                    n2 = limpiar_texto_para_match(str(f_row.get('Nombre 2', '')))
-                    if (id_cartola_limpio[:4] in n1) or (id_cartola_limpio[:4] in n2) or (n1[:4] in id_cartola_limpio):
-                        facturas_usadas.add(f_row['Folio'])
-                        cruce_list.append({
-                            'Fecha Banco': row_c['Fecha'],
-                            'Identificador Cartola': id_cartola,
-                            'Monto Banco ($)': monto_pago,
-                            'Folios Factura(s)': f_row['Folio'],
-                            'Entidad Matcheada': f_row.get('Nombre 1', f_row.get('Nombre 2', 'N/A')),
-                            'Match Por': 'Monto + Nombre Aprox',
-                            'Monto Factura ($)': f_row['Monto Total'],
-                            'Diferencia ($)': 0,
-                            'Estado Conciliación': '🟢 Conciliado Exacto'
-                        })
-                        match_encontrado = True
-                        break
+        # CAPA 3: Match Global por Monto Exacto + Coincidencia Parcial de Nombre
+        if not match_encontrado:
+            match_monto_global = ventas_disponibles[ventas_disponibles['Monto Total'] == monto_pago]
+            if not match_monto_global.empty:
+                for f_idx, f_row in match_monto_global.iterrows():
+                    nom_limpio = f_row['N1_Limpio']
+                    if len(id_cartola_limpio_texto) >= 3 and len(nom_limpio) >= 3:
+                        if (id_cartola_limpio_texto[:3] in nom_limpio) or (nom_limpio[:3] in id_cartola_limpio_texto):
+                            facturas_usadas.add(f_row['Folio'])
+                            cruce_list.append({
+                                'Fecha Banco': row_c['Fecha'],
+                                'Identificador Cartola': id_cartola,
+                                'Monto Banco ($)': monto_pago,
+                                'Folios Factura(s)': f_row['Folio'],
+                                'Entidad Matcheada': f_row.get('Nombre 1', 'N/A'),
+                                'Match Por': 'Monto Exacto + Coincidencia Nombre',
+                                'Monto Factura ($)': f_row['Monto Total'],
+                                'Diferencia ($)': 0,
+                                'Estado Conciliación': '🟢 Conciliado Exacto'
+                            })
+                            match_encontrado = True
+                            break
 
-        # Pendiente / No encontrado
+        # CAPA 4: Si hubo cliente pero no cuadró el monto (Diferencia de pago)
         if not match_encontrado:
             if not candidatos_cliente.empty:
                 f_row = candidatos_cliente.iloc[0]
@@ -547,7 +547,6 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
 
 
 def generar_excel_descarga(df_cartola, df_incompletos, df_ventas, df_cruce, df_pendientes, empresa, periodo_str):
-    """Genera reporte Excel consolidado."""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         if not df_cruce.empty:
@@ -615,7 +614,9 @@ tab1, tab2, tab3 = st.tabs([
 
 with tab1:
     if archivo_cartola is not None:
-        df_cartola_global, df_incompletos_global, estado_cartola = normalizar_cartola(archivo_cartola)
+        file_bytes = archivo_cartola.getvalue()
+        df_cartola_global, df_incompletos_global, estado_cartola = normalizar_cartola_cached(file_bytes, archivo_cartola.name.lower())
+        
         if estado_cartola == "OK":
             total_ingresos = df_cartola_global['Monto Pago'].sum() if not df_cartola_global.empty else 0
             
@@ -644,7 +645,9 @@ with tab1:
 
 with tab2:
     if archivo_ventas is not None:
-        df_ventas_global, estado_ventas = normalizar_ventas(archivo_ventas)
+        file_bytes_v = archivo_ventas.getvalue()
+        df_ventas_global, estado_ventas = normalizar_ventas_cached(file_bytes_v, archivo_ventas.name.lower())
+        
         if estado_ventas == "OK" and df_ventas_global is not None:
             total_ventas = df_ventas_global['Monto Total'].sum() if not df_ventas_global.empty else 0
             
@@ -672,7 +675,7 @@ df_pendientes_global = pd.DataFrame()
 
 with tab3:
     if not df_cartola_global.empty and df_ventas_global is not None and not df_ventas_global.empty:
-        df_cruce_global, df_pendientes_global = conciliar_informacion_flexible(df_cartola_global, df_ventas_global)
+        df_cruce_global, df_pendientes_global = conciliar_informacion_flexible_cached(df_cartola_global, df_ventas_global)
 
         col_m1, col_m2, col_m3 = st.columns(3)
         conciliados_count = len(df_cruce_global[df_cruce_global['Estado Conciliación'].str.contains('🟢')])
