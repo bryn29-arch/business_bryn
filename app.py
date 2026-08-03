@@ -101,16 +101,15 @@ def limpiar_monto_celda(val):
 # ALGORITMO SUBSET SUM OPTIMIZADO (BRANCH AND BOUND)
 # -----------------------------------------------------------------------------
 
-def buscar_combinacion_subconjunto(df_candidatos, monto_objetivo, col_monto='Monto_Real', max_docs=25):
+def buscar_combinacion_subconjunto(df_candidatos, monto_objetivo, col_monto='Monto_Real', max_docs=30):
     """
     Busca de manera ultra rápida un grupo de facturas que sumen exactamente el monto del banco.
-    Reemplaza itertools.combinations evitando el colapso de memoria/tiempo.
     """
     if df_candidatos.empty or monto_objetivo <= 0:
         return []
 
-    # 1. Poda inicial: Eliminar facturas con monto mayor al abono del banco
-    candidatos_df = df_candidatos[df_candidatos[col_monto] <= (monto_objetivo + 0.99)].copy()
+    # 1. Poda inicial: Eliminar facturas con monto mayor al abono del banco (+1 de margen por redondeo)
+    candidatos_df = df_candidatos[df_candidatos[col_monto] <= (monto_objetivo + 1.0)].copy()
     if candidatos_df.empty:
         return []
 
@@ -132,12 +131,12 @@ def buscar_combinacion_subconjunto(df_candidatos, monto_objetivo, col_monto='Mon
             resultado_indices = list(combo_actual)
             return
 
-        if suma_actual > monto_objetivo or index >= len(items) or len(combo_actual) >= max_docs:
+        if suma_actual > (monto_objetivo + 1.0) or index >= len(items) or len(combo_actual) >= max_docs:
             return
 
         # Poda de corte: Si la suma acumulada + todo lo que queda disponible no alcanza el objetivo
         suma_restante = sum(m for _, m in items[index:])
-        if (suma_actual + suma_restante) < (monto_objetivo - 0.99):
+        if (suma_actual + suma_restante) < (monto_objetivo - 1.0):
             return
 
         # Opción 1: Incluir la factura actual
@@ -201,16 +200,23 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
         ventas_disponibles = df_ventas_prep[~df_ventas_prep.index.isin(indices_ventas_usados)]
 
         # =====================================================================
-        # ESTRATEGIA 0: SUBSET SUM OPTIMIZADO POR RUT (SUMA EXACTA 1:N)
+        # ESTRATEGIA 0: BÚSQUEDA AGRUPADA POR RUT (FORZAR SUMA EXACTA DEL BANCO)
         # =====================================================================
         if rut_c and monto_banco > 0:
             cand_rut = ventas_disponibles[ventas_disponibles['RUT_Norm'] == rut_c]
             
             if not cand_rut.empty:
-                combo_encontrada = buscar_combinacion_subconjunto(cand_rut, monto_banco, col_monto='Monto_Real')
-                if combo_encontrada:
-                    match_indices = combo_encontrada
-                    tipo_match = f"RUT 1 (Pago Agrupado 1:{len(combo_encontrada)})" if len(combo_encontrada) > 1 else "RUT 1 (Exacto 1:1)"
+                # 1. Intentar si hay 1 sola factura con el monto exacto
+                coincidencia_exacta_1a1 = cand_rut[abs(cand_rut['Monto_Real'] - monto_banco) < 1.0]
+                if not coincidencia_exacta_1a1.empty:
+                    match_indices = [coincidencia_exacta_1a1.index[0]]
+                    tipo_match = "RUT 1 (Exacto 1:1)"
+                else:
+                    # 2. BÚSQUEDA SUBSET SUM: Exigir combinación de facturas que SUME EXACTO el banco
+                    combo_encontrada = buscar_combinacion_subconjunto(cand_rut, monto_banco, col_monto='Monto_Real')
+                    if combo_encontrada:
+                        match_indices = combo_encontrada
+                        tipo_match = f"RUT 1 (Pago Agrupado 1:{len(combo_encontrada)})"
 
         # =====================================================================
         # ESTRATEGIA 1: TEXTO FLEX + MONTO EXACTO (1 a 1)
