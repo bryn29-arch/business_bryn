@@ -11,7 +11,7 @@ import io
 # CONFIGURACIÓN DE PÁGINA
 # -----------------------------------------------------------------------------
 st.set_page_config(
-    page_title="Conciliación Bancaria Avanzada - Corrección de Sumas",
+    page_title="Conciliación Bancaria Avanzada - Sumas Agrupadas PRO",
     page_icon="📊",
     layout="wide"
 )
@@ -27,7 +27,7 @@ ABREVIATURAS = {
 }
 
 def extraer_rut(texto):
-    """Extrae RUT sin puntos ni guion para cruces exactos (ej: 76334370K)."""
+    """Extrae RUT sin puntos ni guion para cruces exactos (ej: 76334370K o 93546000K)."""
     if not isinstance(texto, str) or pd.isna(texto):
         return ""
     match = re.search(r'\b(\d{1,2}\.?\d{3}\.?\d{3}-?[\dkK])\b', str(texto))
@@ -79,7 +79,7 @@ def calcular_similitud_textual(texto1, texto2):
     return SequenceMatcher(None, t1, t2).ratio()
 
 def limpiar_monto_celda(val):
-    """Convierte un valor individual a flotante limpio."""
+    """Convierte un valor numérico/moneda a flotante limpio."""
     if pd.isna(val):
         return 0.0
     if isinstance(val, (int, float)):
@@ -98,27 +98,8 @@ def limpiar_monto_celda(val):
     except ValueError:
         return 0.0
 
-def obtener_monto_de_fila(row, col_monto_nom=None):
-    """
-    Garantiza extraer el MONTO REAL de la fila y NO el número de documento.
-    Si existe una columna identificada como monto la usa; si no, toma el valor más lógico.
-    """
-    if col_monto_nom and col_monto_nom in row.index:
-        return limpiar_monto_celda(row[col_monto_nom])
-    
-    # Si no se especifica columna, extraer numéricos y descartar folios típicos
-    cand = []
-    for val in row.values:
-        m = limpiar_monto_celda(val)
-        if m > 0:
-            cand.append(m)
-    if cand:
-        # Por lo general, el monto de la factura es mayor que el número de folio
-        return max(cand)
-    return 0.0
-
 # -----------------------------------------------------------------------------
-# ALGORITMO DE CONCILIACIÓN CON SUMAS CORREGIDAS
+# ALGORITMO DE CONCILIACIÓN CON BÚSQUEDA COMBINATORIA FORZADA POR RUT
 # -----------------------------------------------------------------------------
 
 @st.cache_data
@@ -143,15 +124,21 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
     df_ventas_prep['Fila_Texto_Norm'] = df_ventas_prep['Fila_Texto'].apply(expandir_y_limpiar_texto)
     df_ventas_prep['RUT_Norm'] = df_ventas_prep['Fila_Texto'].apply(extraer_rut)
     
-    # EXTRAER MONTO PURO Y UNICO POR FILA
-    df_ventas_prep['Monto_Real'] = df_ventas_prep.apply(lambda r: obtener_monto_de_fila(r, col_monto_v), axis=1)
+    # EXTRAER MONTO REAL DIRECTO DE LA COLUMNA
+    if col_monto_v:
+        df_ventas_prep['Monto_Real'] = df_ventas_prep[col_monto_v].apply(limpiar_monto_celda)
+    else:
+        df_ventas_prep['Monto_Real'] = df_ventas_prep.apply(lambda r: max([limpiar_monto_celda(v) for v in r.values] + [0.0]), axis=1)
 
     for idx_c, row_c in df_cartola.iterrows():
         texto_c_raw = " ".join([str(v) for v in row_c.values if pd.notna(v)])
         texto_c_norm = expandir_y_limpiar_texto(texto_c_raw)
         rut_c = extraer_rut(texto_c_raw)
         
-        monto_banco = obtener_monto_de_fila(row_c, col_monto_c)
+        if col_monto_c:
+            monto_banco = limpiar_monto_celda(row_c[col_monto_c])
+        else:
+            monto_banco = max([limpiar_monto_celda(v) for v in row_c.values] + [0.0])
 
         match_indices = []
         tipo_match = "Sin Coincidencia"
@@ -159,7 +146,7 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
         ventas_disponibles = df_ventas_prep[~df_ventas_prep.index.isin(indices_ventas_usados)]
 
         # =====================================================================
-        # ESTRATEGIA 0: EVALUACIÓN POR RUT CON SUMA COMBINATORIA REAL
+        # ESTRATEGIA 0: BÚSQUEDA COMBINATORIA STRICTA POR RUT (SUMA EXACTA 1:N)
         # =====================================================================
         if rut_c and monto_banco > 0:
             cand_rut = ventas_disponibles[ventas_disponibles['RUT_Norm'] == rut_c]
@@ -168,12 +155,12 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
                 indices_cand_rut = cand_rut.index.tolist()
                 encontrado_rut = False
                 
-                # Probar combinaciones de 1 hasta 15 facturas del MISMO RUT
-                for r in range(1, min(15, len(indices_cand_rut) + 1)):
+                # Probar TODAS las combinaciones de 1 hasta N facturas del MISMO RUT
+                for r in range(1, min(20, len(indices_cand_rut) + 1)):
                     for combo in combinations(indices_cand_rut, r):
-                        # SUMA MONETARIA DIRECTA DE CADA FACTURA DEL COMBO
                         suma_combo = sum(df_ventas_prep.loc[i, 'Monto_Real'] for i in combo)
                         
+                        # SI LA SUMA DA EXACTA CON EL BANCO -> ACEPTAR GRUPO COMPLETO
                         if abs(monto_banco - suma_combo) < 1.0:
                             match_indices = list(combo)
                             tipo_match = f"RUT 1 (Pago Agrupado 1:{len(combo)})" if len(combo) > 1 else "RUT 1 (Exacto 1:1)"
@@ -302,7 +289,7 @@ if file_cartola and file_ventas:
         st.success("Archivos cargados correctamente.")
 
         if st.button("🚀 Ejecutar Conciliación Inteligente", type="primary"):
-            with st.spinner("Ejecutando cruce con valores numéricos aislados..."):
+            with st.spinner("Ejecutando cruce combinatorio por RUT..."):
                 df_cruce, df_pendientes = conciliar_informacion_flexible(df_cartola, df_ventas)
 
             st.divider()
