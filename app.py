@@ -63,7 +63,15 @@ if tokens1 and tokens2:
 return SequenceMatcher(None, t1, t2).ratio()
 
 def extraer_montos_de_fila(row):"""Extrae todos los números/montos válidos de las celdas de una fila."""montos = []for val in row.values:if pd.isna(val):continueif isinstance(val, (int, float)):if abs(val) > 0:montos.append(abs(float(val)))else:val_str = str(val).strip().replace('$', '').replace(' ', '')if ',' in val_str and '.' in val_str:if val_str.rfind('.') < val_str.rfind(','):val_str = val_str.replace('.', '').replace(',', '.')else:val_str = val_str.replace(',', '')elif ',' in val_str:val_str = val_str.replace(',', '.')
+def obtener_monto_principal(montos):
+    """
+    Devuelve el monto más probable de una fila.
+    En documentos normalmente el mayor número corresponde al monto.
+    """
+    if not montos:
+        return 0.0
 
+    return max(montos)
         val_str = re.sub(r'[^0-9.-]', '', val_str)
         try:
             num = float(val_str)
