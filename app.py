@@ -68,30 +68,8 @@ st.markdown("""
 
 
 # ---------------------------------------------------------
-# LIMPIEZA EXTREMA Y EXTRACTION DE TEXTO
+# FUNCIONES AUXILIARES Y EXTRACTION DE TEXTO
 # ---------------------------------------------------------
-
-def normalizar_texto_match(texto):
-    """
-    Transforma cualquier texto a una cadena limpia sin espacios, puntos ni siglas.
-    Ejemplos:
-      'Pro Drilling S A' -> 'PRODRILLING'
-      'PRODRILLING S.A' -> 'PRODRILLING'
-      'Mtl Ingenieria Construccion Y Servi' -> 'MTLINGENIERIACONSTRUCCIONYSERVI'
-    """
-    if not isinstance(texto, str) or not texto.strip():
-        return ""
-    
-    t = texto.upper()
-    # Eliminar siglas legales habituales
-    siglas = [r'\bS\.?A\.?\b', r'\bS\.?P\.?A\.?\b', r'\bLTDA\.?\b', r'\bLIMITADA\b', r'\bE\.?I\.?R\.?L\.?\b', r'\bINC\b']
-    for sigla in siglas:
-        t = re.sub(sigla, '', t)
-        
-    # Eliminar TODO salvo letras y números (elimina espacios, guiones, puntos)
-    t = re.sub(r'[^A-Z0-9]', '', t)
-    return t.strip()
-
 
 def extraer_rut_o_nombre(texto):
     """Detecta RUTs o Nombres/Razones Sociales en glosas bancarias."""
@@ -125,7 +103,7 @@ def extraer_rut_o_nombre(texto):
 
 
 def extraer_monto_chileno_estricto(texto_o_celda):
-    """Extrae montos numéricos."""
+    """Extrae montos numéricos limpios descartando RUTs o folios."""
     if pd.isna(texto_o_celda) or str(texto_o_celda).strip() in ['', 'None', 'nan', '0']:
         return None
 
@@ -174,7 +152,6 @@ def extraer_monto_chileno_estricto(texto_o_celda):
 # ---------------------------------------------------------
 
 def normalizar_cartola(archivo_subido):
-    """Procesa la cartola bancaria."""
     nombre_archivo = archivo_subido.name.lower()
     registros_ok = []
     registros_dudosos = []
@@ -255,7 +232,6 @@ def normalizar_cartola(archivo_subido):
 # ---------------------------------------------------------
 
 def normalizar_ventas(archivo_subido):
-    """Procesa el registro de ventas creando un buscador consolidado."""
     nombre_archivo = archivo_subido.name.lower()
     try:
         if nombre_archivo.endswith(('.xlsx', '.xls')):
@@ -271,7 +247,7 @@ def normalizar_ventas(archivo_subido):
         if df_raw.empty:
             return None, "El archivo está vacío."
 
-        # Detectar encabezados
+        # Detectar la fila que contiene los encabezados reales
         header_row_idx = None
         for idx in range(min(12, len(df_raw))):
             row_str = " ".join([str(val).lower() for val in df_raw.iloc[idx].values if pd.notna(val)])
@@ -287,7 +263,6 @@ def normalizar_ventas(archivo_subido):
         cols_clean = {c: str(c).strip() for c in df_raw.columns if pd.notna(c)}
         df_raw = df_raw.rename(columns=cols_clean)
 
-        # Identificar Folio y Monto
         col_folio = next((c for c in df_raw.columns if any(k in c.lower() for k in ['folio', 'nro.docto', 'nro_docto', 'nro factura', 'num_docto'])), None)
         col_monto = next((c for c in df_raw.columns if any(k in c.lower() for k in ['monto total', 'v. docto.', 'v_docto', 'v.adeudado', 'total', 'monto'])), None)
 
@@ -295,15 +270,13 @@ def normalizar_ventas(archivo_subido):
         df_final['Folio'] = df_raw[col_folio].astype(str).str.split('.').str[0] if col_folio else [f"{i+1}" for i in range(len(df_raw))]
         df_final['Monto Total'] = df_raw[col_monto].apply(lambda x: extraer_monto_chileno_estricto(x) or 0) if col_monto else 0
 
-        # Crear una SUPER-TEXTO de Búsqueda consolidando todas las celdas de la fila
+        # Guardar la fila completa como texto plano para búsquedas globales
         def construir_texto_consolidado(row):
-            elementos = [str(val) for val in row.values if pd.notna(val)]
-            return " ".join(elementos)
+            return " ".join([str(val) for val in row.values if pd.notna(val)])
 
         df_final['Texto_Fila_Completo'] = df_raw.apply(construir_texto_consolidado, axis=1)
-        df_final['Texto_Fila_Limpio'] = df_final['Texto_Fila_Completo'].apply(normalizar_texto_match)
 
-        # Extraer nombre visual de referencia
+        # Nombre visual de referencia
         nom_cols = [c for c in df_raw.columns if any(k in c.lower() for k in ['nombre', 'razon', 'cliente', 'deudor', 'receptor'])]
         if nom_cols:
             df_final['Nombre Cliente'] = df_raw[nom_cols[-1]].astype(str).str.strip().str.upper()
@@ -317,13 +290,13 @@ def normalizar_ventas(archivo_subido):
 
 
 # ---------------------------------------------------------
-# NUEVO MOTOR DE CONCILIACIÓN
+# MOTOR DE CONCILIACIÓN POR FUERZA BRUTA DE TOKENS
 # ---------------------------------------------------------
 
 def conciliar_informacion_flexible(df_cartola, df_ventas):
     """
-    Conciliador robusto: Compara cadenas ultra-limpias sin espacios
-    y cruza monto exacto por cada item.
+    Motor de coincidencia directa buscando palabras clave de la glosa 
+    dentro del texto completo de cada fila del Excel de ventas.
     """
     if df_cartola.empty or df_ventas is None or df_ventas.empty:
         return pd.DataFrame(), pd.DataFrame()
@@ -331,42 +304,42 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
     cruce_list = []
     facturas_usadas = set()
 
+    # Palabras a ignorar para no confundir términos bancarios con empresas
+    palabras_ignorar = {
+        'TRASPASO', 'TRANSFERENCIA', 'PAGO', 'PROVEEDORES', 'INTERNET', 
+        'BANCO', 'DE', 'DEL', 'POR', 'CTA', 'CUENTA', 'OFICINA', 'CENTRAL',
+        'ABONO', 'CARGO', 'CHILE', 'SANTANDER', 'ESTADO', 'BCI'
+    }
+
     for idx_c, row_c in df_cartola.iterrows():
-        identificador_banco = str(row_c['Identificador / Cliente'])
-        glosa_banco = str(row_c['Descripción Glosa'])
+        glosa_raw = str(row_c['Descripción Glosa']).upper()
+        identificador_raw = str(row_c['Identificador / Cliente']).upper()
         monto_pago = float(row_c['Monto Pago'])
 
-        # Cadenas ultra-limpias de la cartola (sin espacios ni caracteres especiales)
-        id_banco_limpio = normalizar_texto_match(identificador_banco)
-        glosa_banco_limpia = normalizar_texto_match(glosa_banco)
+        # Extraer palabras relevantes de la glosa bancaria
+        tokens_glosa = [
+            p for p in re.findall(r'[A-Z0-9]+', glosa_raw) 
+            if len(p) >= 3 and p not in palabras_ignorar
+        ]
 
-        # Facturas que aún no se han asignado
         ventas_disponibles = df_ventas[~df_ventas['Folio'].isin(facturas_usadas)].copy()
-
-        # --- PASO 1: Filtrar todas las facturas de esa Empresa ---
-        def coincide_empresa(row_v):
-            texto_v_limpio = row_v['Texto_Fila_Limpio']
-            
-            # Buscar si el ID del banco (ej: PRODRILLING) está contenido en la fila de ventas
-            if len(id_banco_limpio) >= 3 and id_banco_limpio in texto_v_limpio:
-                return True
-                
-            # O si la glosa del banco contiene el nombre de la empresa
-            if len(glosa_banco_limpia) >= 3 and id_banco_limpio in glosa_banco_limpia:
-                # Comprobar intersección de palabras clave
-                for sub_cadena in [id_banco_limpio, id_banco_limpio[:6]]:
-                    if len(sub_cadena) >= 3 and sub_cadena in texto_v_limpio:
-                        return True
-            return False
-
-        mask_cliente = ventas_disponibles.apply(coincide_empresa, axis=1)
-        coincidencias_cliente = ventas_disponibles[mask_cliente]
-
-        # --- PASO 2: Cruzar por Monto Exacto ---
         match_final = pd.DataFrame()
 
+        # 1. BÚSQUEDA DE PALABRAS EN EL TEXTO COMPLETO DE LA FILA DEL EXCEL
+        indices_coincidentes = []
+        for idx_v, row_v in ventas_disponibles.iterrows():
+            texto_fila_v = str(row_v['Texto_Fila_Completo']).upper()
+            
+            # Verificar si alguna palabra clave (ej. PRODRILLING) existe en la fila
+            for token in tokens_glosa:
+                if token in texto_fila_v:
+                    indices_coincidentes.append(idx_v)
+                    break
+
+        coincidencias_cliente = ventas_disponibles.loc[indices_coincidentes] if indices_coincidentes else pd.DataFrame()
+
+        # 2. EVALUACIÓN DE MONTO
         if not coincidencias_cliente.empty:
-            # Buscar la factura que tenga el MONTO EXACTO del abono
             match_exacto = coincidencias_cliente[coincidencias_cliente['Monto Total'] == monto_pago]
             if not match_exacto.empty:
                 match_final = match_exacto.head(1)
@@ -376,17 +349,12 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
                 coincidencias_cliente['dif_abs'] = (coincidencias_cliente['Monto Total'] - monto_pago).abs()
                 match_final = coincidencias_cliente.sort_values(by='dif_abs').head(1)
         else:
-            # Rescate global: Si el nombre venía distorsionado, buscar por MONTO EXACTO global
-            match_monto_global = ventas_disponibles[ventas_disponibles['Monto Total'] == monto_pago]
-            if not match_monto_global.empty:
-                for idx_m, row_m in match_monto_global.iterrows():
-                    texto_m_limpio = row_m['Texto_Fila_Limpio']
-                    # Validar que al menos concuerden las primeras 4 letras del nombre
-                    if len(id_banco_limpio) >= 4 and id_banco_limpio[:4] in texto_m_limpio:
-                        match_final = match_monto_global.loc[[idx_m]]
-                        break
+            # RESCATE GLOBAL: Si el nombre venía distorsionado, buscar por MONTO EXACTO
+            match_monto = ventas_disponibles[ventas_disponibles['Monto Total'] == monto_pago]
+            if not match_monto.empty:
+                match_final = match_monto.head(1)
 
-        # --- PASO 3: Registrar el Cruce ---
+        # 3. REGISTRO DEL RESULTADO
         if not match_final.empty:
             f_row = match_final.iloc[0]
             facturas_usadas.add(f_row['Folio'])
@@ -395,10 +363,10 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
             
             cruce_list.append({
                 'Fecha Banco': row_c['Fecha'],
-                'Identificador Cartola': identificador_banco,
+                'Identificador Cartola': identificador_raw,
                 'Monto Banco ($)': monto_pago,
                 'Folio Factura': f_row['Folio'],
-                'Entidad Matcheada': f_row['Nombre Cliente'],
+                'Entidad Matcheada': f_row.get('Nombre Cliente', 'CLIENTE ENCONTRADO'),
                 'Monto Factura ($)': f_row['Monto Total'],
                 'Diferencia ($)': dif,
                 'Estado Conciliación': estado
@@ -406,7 +374,7 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
         else:
             cruce_list.append({
                 'Fecha Banco': row_c['Fecha'],
-                'Identificador Cartola': identificador_banco,
+                'Identificador Cartola': identificador_raw,
                 'Monto Banco ($)': monto_pago,
                 'Folio Factura': 'N/A',
                 'Entidad Matcheada': 'NO ENCONTRADO',
@@ -531,7 +499,7 @@ with tab2:
     else:
         st.info("Sube el registro de ventas o cartera de documentos en la sección superior.")
 
-# TAB 3: CRUCE
+# TAB 3: CRUCE Y CONCILIACIÓN
 df_cruce_global = pd.DataFrame()
 df_pendientes_global = pd.DataFrame()
 
@@ -605,3 +573,4 @@ if not df_cartola_global.empty or df_ventas_global is not None:
                 mime="text/csv",
                 use_container_width=True
             )
+
