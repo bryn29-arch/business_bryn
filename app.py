@@ -4,6 +4,7 @@ import numpy as np
 import re
 import pdfplumber
 import io
+from difflib import SequenceMatcher
 
 # ---------------------------------------------------------
 # CONFIGURACIÓN DE PÁGINA Y ESTILOS
@@ -71,28 +72,44 @@ st.markdown("""
 # FUNCIONES AUXILIARES DE EXTRACCIÓN Y LIMPIEZA
 # ---------------------------------------------------------
 
-def limpiar_texto_para_match(texto):
+def normalizar_cadena_extrema(texto):
     """
-    Limpia un texto/nombre quitando espacios, puntos, comas,
-    y siglas jurídicas para facilitar el match flexible.
-    Ej: 'Pro Drilling S A' -> 'PRODRILLING'
-        'PRODRILLING S.A' -> 'PRODRILLING'
+    Convierte 'Pro Drilling S A' y 'PRODRILLING S.A' en 'PRODRILLING'.
+    Elimina espacios, puntos, comas y siglas legales para asegurar el match.
     """
     if not isinstance(texto, str) or not texto.strip():
         return ""
     
-    # 1. Convertir a mayúsculas
     t = texto.upper()
     
-    # 2. Remover siglas legales comunes
-    siglas = [r'\bS\.?A\.?\b', r'\bS\.?P\.?A\.?\b', r'\bLTDA\.?\b', r'\bLIMITADA\b', r'\bE\.?I\.?R\.?L\.?\b']
+    # 1. Eliminar siglas de sociedades comunes
+    siglas = [r'\bS\.?A\.?\b', r'\bS\.?P\.?A\.?\b', r'\bLTDA\.?\b', r'\bLIMITADA\b', r'\bE\.?I\.?R\.?L\.?\b', r'\bINC\b']
     for sigla in siglas:
         t = re.sub(sigla, '', t)
         
-    # 3. Remover caracteres no alfanuméricos y ESPACIOS
+    # 2. Remover todo lo que no sea letra o número (elimina espacios y puntuación)
     t = re.sub(r'[^A-Z0-9]', '', t)
-    
     return t.strip()
+
+
+def es_similar(texto1, texto2, umbral=0.75):
+    """
+    Compara dos nombres tolerando diferencias de espacios o textos cortados
+    (ej: 'Mtl Ingenieria' vs 'Mtl Ingenieria Construccion Y Servi').
+    """
+    t1_norm = normalizar_cadena_extrema(texto1)
+    t2_norm = normalizar_cadena_extrema(texto2)
+    
+    if not t1_norm or not t2_norm:
+        return False
+        
+    # Coincidencia directa sin espacios (ej: PRODRILLING == PRODRILLING)
+    if t1_norm == t2_norm or t1_norm in t2_norm or t2_norm in t1_norm:
+        return True
+        
+    # Ratio de similitud textual para nombres cortados
+    ratio = SequenceMatcher(None, t1_norm, t2_norm).ratio()
+    return ratio >= umbral
 
 
 def extraer_rut_o_nombre(texto):
@@ -100,13 +117,13 @@ def extraer_rut_o_nombre(texto):
     if not isinstance(texto, str) or not texto.strip():
         return "NO_DETECTADO"
 
-    # 1. Pago Proveedores con RUT de 9 o 10 dígitos pegado (ej: 0795324704 -> 79.532.470-4)
+    # 1. Pago Proveedores con RUT pegado
     match_prov = re.search(r'Pago:\s*Proveedores\s+0?(\d{7,8})([\dkK])\b', texto, re.IGNORECASE)
     if match_prov:
         body, dv = match_prov.group(1), match_prov.group(2).upper()
         return f"{int(body)}-{dv}"
 
-    # 2. RUT Estándar con puntos/guión o sin ellos (12.345.678-9 o 12345678-9)
+    # 2. RUT Estándar con puntos/guión o sin ellos
     match_std = re.search(r'\b(\d{1,2}(?:\.?\d{3}){2}-?[\dkK])\b', texto)
     if match_std:
         rut_raw = match_std.group(0).replace('.', '').upper()
@@ -114,7 +131,7 @@ def extraer_rut_o_nombre(texto):
             rut_raw = rut_raw[:-1] + '-' + rut_raw[-1]
         return rut_raw
 
-    # 3. RUT Continuo aislado de 8 o 9 dígitos
+    # 3. RUT Continuo aislado
     match_continuo = re.search(r'\b0?(\d{7,8}[\dkK])\b', texto)
     if match_continuo:
         raw = match_continuo.group(1).upper()
@@ -131,7 +148,7 @@ def extraer_rut_o_nombre(texto):
 
 
 def extraer_monto_chileno_estricto(texto_o_celda):
-    """Extrae montos numéricos soportando comas o puntos como separadores de miles."""
+    """Extrae montos numéricos soportando comas o puntos como separadores."""
     if pd.isna(texto_o_celda) or str(texto_o_celda).strip() in ['', 'None', 'nan', '0']:
         return None
 
@@ -140,7 +157,6 @@ def extraer_monto_chileno_estricto(texto_o_celda):
         return val if val > 0 else None
 
     texto = str(texto_o_celda).strip()
-
     texto_limpio = re.sub(r'\b\d{7,8}-[\dkK]\b', '', texto)
     texto_limpio = re.sub(r'Pago:\s*Proveedores\s+\d+[\dkK]?', '', texto_limpio, flags=re.IGNORECASE)
 
@@ -184,7 +200,7 @@ def extraer_monto_chileno_estricto(texto_o_celda):
 # ---------------------------------------------------------
 
 def normalizar_cartola(archivo_subido):
-    """Procesa cartolas bancarias leyendo hojas continuas sin descartar movimientos idénticos."""
+    """Procesa cartolas bancarias leyendo movimientos continuos."""
     nombre_archivo = archivo_subido.name.lower()
     registros_ok = []
     registros_dudosos = []
@@ -199,7 +215,6 @@ def normalizar_cartola(archivo_subido):
         if nombre_archivo.endswith('.pdf'):
             with pdfplumber.open(archivo_subido) as pdf:
                 for num_pag, pagina in enumerate(pdf.pages, start=1):
-                    
                     texto_pag = pagina.extract_text() or ""
                     lineas_texto = [l.strip() for l in texto_pag.split('\n') if l.strip()]
 
@@ -216,7 +231,6 @@ def normalizar_cartola(archivo_subido):
 
                     for texto_fila in lineas_a_procesar:
                         texto_lower = texto_fila.lower()
-
                         es_cabecera = any(cabe in texto_lower for cabe in palabras_cabecera_estricta)
                         has_fecha = bool(re.search(r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b', texto_fila))
 
@@ -353,9 +367,7 @@ def normalizar_ventas(archivo_subido):
             val_str = str(val).strip()
             val_limpio = val_str.split('.')[0] if '.' in val_str else val_str
             numeros = re.findall(r'\d+', val_limpio)
-            if numeros:
-                return "".join(numeros)
-            return val_str
+            return "".join(numeros) if numeros else val_str
 
         if col_folio:
             df_final['Folio'] = df_raw[col_folio].apply(extraer_numero_folio)
@@ -388,13 +400,13 @@ def normalizar_ventas(archivo_subido):
 
 
 # ---------------------------------------------------------
-# CONCILIACIÓN AUTOMÁTICA FLEXIBLE (ACTUALIZADA)
+# CONCILIACIÓN AUTOMÁTICA CON FUZZY MATCH
 # ---------------------------------------------------------
 
 def conciliar_informacion_flexible(df_cartola, df_ventas):
     """
-    Conciliación automática 1 a 1 tolerando diferencias de formato en nombres
-    y múltiples abonos/facturas del mismo cliente.
+    Concilia cartola con registro de ventas tolerando diferencias de espacios,
+    siglas, nombres cortados y múltiples facturas del mismo cliente.
     """
     if df_cartola.empty or df_ventas is None or df_ventas.empty:
         return pd.DataFrame(), pd.DataFrame()
@@ -404,7 +416,6 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
 
     for idx_c, row_c in df_cartola.iterrows():
         id_cartola = str(row_c['Identificador / Cliente']).strip().upper()
-        id_cartola_limpio = limpiar_texto_para_match(id_cartola)
         monto_pago = float(row_c['Monto Pago'])
         
         # Filtrar solo facturas no asignadas previamente
@@ -413,9 +424,9 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
         coincidencias_cliente = pd.DataFrame()
         criterio_encontrado = ""
 
-        # --- PASO 1: Identificar todas las facturas del CLIENTE ---
+        # --- PASO 1: Identificar facturas del CLIENTE (RUT o Nombre Similar) ---
         
-        # 1.1 Match por RUT 1 o RUT 2
+        # 1.1 Match directo por RUT
         if 'RUT 1' in ventas_disponibles.columns:
             coincidencias_cliente = ventas_disponibles[ventas_disponibles['RUT 1'].str.upper() == id_cartola]
             if not coincidencias_cliente.empty:
@@ -426,60 +437,61 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
             if not coincidencias_cliente.empty:
                 criterio_encontrado = "RUT 2"
 
-        # 1.2 Match por Nombre Flexible (Pro Drilling S A == PRODRILLING S.A)
-        if coincidencias_cliente.empty and len(id_cartola_limpio) >= 3:
-            if 'Nombre 1' in ventas_disponibles.columns:
-                nombres_1_limpios = ventas_disponibles['Nombre 1'].apply(limpiar_texto_para_match)
-                mask_n1 = nombres_1_limpios.apply(lambda x: (id_cartola_limpio in x or x in id_cartola_limpio) if len(x) >= 3 else False)
-                coincidencias_cliente = ventas_disponibles[mask_n1]
-                if not coincidencias_cliente.empty:
-                    criterio_encontrado = "Nombre (Flex)"
+        # 1.2 Match por Nombre Similar (Fuzzy / Sin Espacios)
+        if coincidencias_cliente.empty:
+            indices_matcheados = []
+            
+            for idx_v, row_v in ventas_disponibles.iterrows():
+                nom1 = str(row_v.get('Nombre 1', ''))
+                nom2 = str(row_v.get('Nombre 2', ''))
+                
+                if es_similar(id_cartola, nom1) or es_similar(id_cartola, nom2):
+                    indices_matcheados.append(idx_v)
+            
+            if indices_matcheados:
+                coincidencias_cliente = ventas_disponibles.loc[indices_matcheados]
+                criterio_encontrado = "Nombre Similar"
 
-            if coincidencias_cliente.empty and 'Nombre 2' in ventas_disponibles.columns:
-                nombres_2_limpios = ventas_disponibles['Nombre 2'].apply(limpiar_texto_para_match)
-                mask_n2 = nombres_2_limpios.apply(lambda x: (id_cartola_limpio in x or x in id_cartola_limpio) if len(x) >= 3 else False)
-                coincidencias_cliente = ventas_disponibles[mask_n2]
-                if not coincidencias_cliente.empty:
-                    criterio_encontrado = "Nombre (Flex)"
-
-        # --- PASO 2: Buscar la factura específica por MONTO dentro del cliente ---
+        # --- PASO 2: Cruzar por Monto Exacto dentro de las facturas del cliente ---
         match_final = pd.DataFrame()
 
         if not coincidencias_cliente.empty:
-            # Buscar el monto exacto dentro de las facturas de ese cliente
             match_exacto = coincidencias_cliente[coincidencias_cliente['Monto Total'] == monto_pago]
             if not match_exacto.empty:
                 match_final = match_exacto.head(1)
+                criterio_encontrado += " + Monto Exacto"
             else:
-                # Si no hay monto exacto, tomar la primera factura del cliente para marcar diferencia
-                match_final = coincidencias_cliente.head(1)
-        else:
-            # Si no pilló al cliente por nombre, busca si hay ALGUNA factura en general con ese monto exacto
-            if len(id_cartola_limpio) >= 3:
-                match_por_monto = ventas_disponibles[ventas_disponibles['Monto Total'] == monto_pago]
-                if not match_por_monto.empty:
-                    for f_idx, f_row in match_por_monto.iterrows():
-                        n1 = limpiar_texto_para_match(str(f_row.get('Nombre 1', '')))
-                        n2 = limpiar_texto_para_match(str(f_row.get('Nombre 2', '')))
-                        if (id_cartola_limpio[:3] in n1) or (id_cartola_limpio[:3] in n2) or (n1[:3] in id_cartola_limpio if len(n1)>=3 else False):
-                            match_final = match_por_monto.loc[[f_idx]]
-                            criterio_encontrado = "Monto + Nombre Aprox"
-                            break
+                # Tomar la factura del cliente con la menor diferencia
+                coincidencias_cliente = coincidencias_cliente.copy()
+                coincidencias_cliente['dif_abs'] = (coincidencias_cliente['Monto Total'] - monto_pago).abs()
+                match_final = coincidencias_cliente.sort_values(by='dif_abs').head(1)
+                criterio_encontrado += " + Dif. Parcial"
 
-        # --- PASO 3: REGISTRAR EL RESULTADO ---
+        else:
+            # Rescate: Si el nombre venía muy destruido pero coincide el MONTO y el inicio del nombre
+            match_por_monto = ventas_disponibles[ventas_disponibles['Monto Total'] == monto_pago]
+            if not match_por_monto.empty:
+                for f_idx, f_row in match_por_monto.iterrows():
+                    nom_v = str(f_row.get('Nombre 1', '')) or str(f_row.get('Nombre 2', ''))
+                    if es_similar(id_cartola[:5], nom_v[:5], umbral=0.6):
+                        match_final = match_por_monto.loc[[f_idx]]
+                        criterio_encontrado = "Monto Exacto + Nombre Aprox"
+                        break
+
+        # --- PASO 3: Registrar Resultado ---
         if not match_final.empty:
             f_row = match_final.iloc[0]
             facturas_usadas.add(f_row['Folio'])
             dif = monto_pago - f_row['Monto Total']
             
-            estado = '🟢 Conciliado Exacto' if dif == 0 else '🟡 Diferencia en Monto'
+            estado = '🟢 Conciliado Exacto' if abs(dif) < 0.01 else '🟡 Diferencia en Monto'
             
             cruce_list.append({
                 'Fecha Banco': row_c['Fecha'],
                 'Identificador Cartola': id_cartola,
                 'Monto Banco ($)': monto_pago,
                 'Folio Factura': f_row['Folio'],
-                'Entidad Matcheada': f_row.get('Nombre 1', f_row.get('Nombre 2', 'N/A')),
+                'Entidad Matcheada': f_row.get('Nombre 2', f_row.get('Nombre 1', 'N/A')),
                 'Match Por': criterio_encontrado,
                 'Monto Factura ($)': f_row['Monto Total'],
                 'Diferencia ($)': dif,
@@ -626,7 +638,7 @@ with tab2:
     else:
         st.info("Sube el registro de ventas o cartera de documentos en la sección superior.")
 
-# TAB 3: CRUCE
+# TAB 3: CRUCE Y CONCILIACIÓN
 df_cruce_global = pd.DataFrame()
 df_pendientes_global = pd.DataFrame()
 
