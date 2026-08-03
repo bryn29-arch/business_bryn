@@ -29,7 +29,7 @@ def extraer_rut(texto):
     """Extrae RUT normalizado (solo números y K) eliminando puntos, guiones y ceros iniciales."""
     if not isinstance(texto, str) or pd.isna(texto):
         return ""
-    # Permite ceros iniciales opcionales
+    # Permite ceros iniciales opcionales para evitar problemas de formato
     match = re.search(r'\b(0*\d{1,3}\.?\d{3}\.?\d{3}-?[\dkK])\b', str(texto))
     if match:
         rut_limpio = re.sub(r'[^0-9K]', '', match.group(1).upper())
@@ -71,7 +71,7 @@ def limpiar_monto_entero(val, solo_positivos=True):
         return 0
 
 def encontrar_columna(columnas, palabras_clave):
-    """Busca un nombre de columna que contenga alguna de las palabras clave."""
+    """Busca un nombre de columna que contenga alguna de las palabras clave de forma robusta."""
     cols_limpias = {col: str(col).strip().upper() for col in columnas}
     for palabra in palabras_clave:
         for col_orig, col_limpia in cols_limpias.items():
@@ -80,7 +80,7 @@ def encontrar_columna(columnas, palabras_clave):
     return None
 
 # -----------------------------------------------------------------------------
-# ALGORITMO SUBSET SUM OPTIMIZADO (O(1) SUFFIX LOOKUP)
+# ALGORITMO SUBSET SUM OPTIMIZADO
 # -----------------------------------------------------------------------------
 def buscar_combinacion_exacta(df_candidatos, monto_objetivo, col_monto='Monto_Real', max_docs=25):
     """
@@ -117,7 +117,7 @@ def buscar_combinacion_exacta(df_candidatos, monto_objetivo, col_monto='Monto_Re
         if acumulado > monto_objetivo or idx >= n or len(combo) >= max_docs:
             return
 
-        # Poda ultra-rápida en O(1)
+        # Poda ultra-rápida
         if acumulado + suffix_sums[idx] < monto_objetivo:
             return
 
@@ -145,19 +145,12 @@ def conciliar_informacion(df_cartola, df_ventas):
     indices_ventas_usados = set()
     df_ventas_prep = df_ventas.copy()
     
-   # ---------------------------------------------------------------------
-    # IDENTIFICACIÓN DE COLUMNAS (Corregido para priorizar RUT Deudor)
-    # ---------------------------------------------------------------------
+    # Identificación automática de columnas priorizando al Deudor
     col_cliente_v = encontrar_columna(df_ventas_prep.columns, ['DEUDOR', 'CLIENTE', 'RAZON']) or df_ventas_prep.columns[0]
-    
-    # Se prioriza estrictamente la columna del deudor antes que la del cliente
     col_rut_v = encontrar_columna(df_ventas_prep.columns, ['RUT DEUDOR', 'RUT. DEUDOR', 'RUT_DEUDOR', 'RUT DEU', 'RUT'])
-    
     col_monto_v = encontrar_columna(df_ventas_prep.columns, ['ADEUDADO', 'MONTO TOT', 'MONTO', 'SALDO'])
     col_folio_v = encontrar_columna(df_ventas_prep.columns, ['DOC', 'FOLIO', 'FACTURA', 'NUMERO'])
     col_monto_c = encontrar_columna(df_cartola.columns, ['ABONO', 'DEPOSITO', 'CREDITO', 'MONTO'])
-
-    # ... [MANTENER LA PARTE DE NORMALIZACIÓN DE TEXTOS Y MONTOS IGUAL] ...
 
     # Preprocesar textos, RUTs y montos en cartera
     df_ventas_prep['Fila_Texto'] = df_ventas_prep.apply(lambda r: " ".join([str(v) for v in r.values if pd.notna(v)]), axis=1)
@@ -187,7 +180,7 @@ def conciliar_informacion(df_cartola, df_ventas):
         ventas_disponibles = df_ventas_prep[~df_ventas_prep.index.isin(indices_ventas_usados)]
 
         # ---------------------------------------------------------------------
-        # CAPA 1 MEJORADA: BÚSQUEDA STRICTA POR RUT (CON SOBREPAGOS Y ABONOS)
+        # CAPA 1: BÚSQUEDA STRICTA POR RUT (Con control de sobrepagos)
         # ---------------------------------------------------------------------
         if rut_c and monto_banco > 0:
             cand_rut = ventas_disponibles[ventas_disponibles['RUT_Norm'] == rut_c]
@@ -208,15 +201,13 @@ def conciliar_informacion(df_cartola, df_ventas):
                         match_indices = combo
                         tipo_match = f"🟢 RUT Pago Agrupado Exacto (1:{len(combo)})"
                     
-                    # Caso C: SOBREPAGO (El cliente depositó más dinero del que debe en la cartera)
+                    # Caso C: SOBREPAGO (Depositó más de lo que debe)
                     elif monto_banco >= suma_total_rut:
-                        # Agrupamos TODAS las facturas del cliente. Quedará una diferencia a favor en la cartola.
                         match_indices = cand_rut.index.tolist()
                         tipo_match = f"🟡 RUT Sobrepago / Pago Total (1:{len(match_indices)})"
                     
-                    # Caso D: ABONO PARCIAL (El cliente pagó menos, no hay suma exacta)
+                    # Caso D: ABONO PARCIAL (Pagó menos de lo que debe)
                     else:
-                        # Ordenamos de mayor a menor e intentamos cubrir la mayor cantidad de facturas posibles
                         cand_ordenado = cand_rut.sort_values(by='Monto_Real', ascending=False)
                         temp_indices = []
                         suma_temp = 0
@@ -230,17 +221,15 @@ def conciliar_informacion(df_cartola, df_ventas):
                             match_indices = temp_indices
                             tipo_match = f"🟡 RUT Abono Parcial Agrupado (1:{len(temp_indices)})"
                         else:
-                            # Si el pago no cubre ni siquiera la factura más pequeña, se asigna a la menor
                             match_indices = [cand_ordenado.index[-1]]
                             tipo_match = "🟡 RUT Abono a Factura Menor"
 
         # ---------------------------------------------------------------------
-        # CAPA 2: BÚSQUEDA AGRUPADA POR NOMBRE DE CLIENTE / TEXTO (UMBRAL MÁS ESTRICTO)
+        # CAPA 2: BÚSQUEDA AGRUPADA POR NOMBRE DE CLIENTE / TEXTO
         # ---------------------------------------------------------------------
         if not match_indices and monto_banco > 0:
             indices_cand_nombre = []
             for idx_v, row_v in ventas_disponibles.iterrows():
-                # Comparar prioritariamente con el nombre del cliente (más preciso que la fila entera)
                 similitud_cliente = SequenceMatcher(None, texto_c_norm, row_v['Cliente_Norm']).ratio()
                 similitud_texto = SequenceMatcher(None, texto_c_norm, row_v['Fila_Texto_Norm']).ratio()
                 
@@ -250,26 +239,24 @@ def conciliar_informacion(df_cartola, df_ventas):
             if indices_cand_nombre:
                 cand_nom = ventas_disponibles.loc[indices_cand_nombre]
                 
-                # Caso A: Factura única por el monto
                 exacto_nom = cand_nom[cand_nom['Monto_Real'] == monto_banco]
                 if not exacto_nom.empty:
                     match_indices = [exacto_nom.index[0]]
-                    tipo_match = "Nombre Exacto (1:1)"
+                    tipo_match = "🟢 Nombre Exacto (1:1)"
                 else:
-                    # Caso B: Combinación de facturas
                     combo_nom = buscar_combinacion_exacta(cand_nom, monto_banco, col_monto='Monto_Real')
                     if combo_nom:
                         match_indices = combo_nom
-                        tipo_match = f"Nombre Agrupado (1:{len(combo_nom)})"
+                        tipo_match = f"🟢 Nombre Agrupado Exacto (1:{len(combo_nom)})"
 
         # ---------------------------------------------------------------------
-        # CAPA 3: MONTO ÚNICO GLOBAL (SÓLO SI NO HAY AMBIGÜEDAD)
+        # CAPA 3: MONTO ÚNICO GLOBAL
         # ---------------------------------------------------------------------
         if not match_indices and monto_banco > 0:
             cand_monto_unico = ventas_disponibles[ventas_disponibles['Monto_Real'] == monto_banco]
             if len(cand_monto_unico) == 1:
                 match_indices = [cand_monto_unico.index[0]]
-                tipo_match = "Monto Unico Coincidente"
+                tipo_match = "🟢 Monto Unico Coincidente"
 
         # ---------------------------------------------------------------------
         # GENERACIÓN DEL REGISTRO
@@ -283,6 +270,14 @@ def conciliar_informacion(df_cartola, df_ventas):
             entidad = rows_matched.iloc[0][col_cliente_v]
             monto_ventas_tot = rows_matched['Monto_Real'].sum()
             dif = monto_banco - monto_ventas_tot
+            
+            # Ajustar estado visual según la diferencia
+            if dif == 0:
+                estado = '🟢 Conciliado Exacto'
+            elif dif > 0:
+                estado = '🟡 Diferencia a Favor (Sobrepago)'
+            else:
+                estado = '🟡 Diferencia en Contra (Abono Parcial)'
 
             cruce_list.append({
                 'Texto Cartola (Fila)': texto_c_raw,
@@ -292,7 +287,7 @@ def conciliar_informacion(df_cartola, df_ventas):
                 'Tipo Coincidencia': tipo_match,
                 'Monto Ventas ($)': monto_ventas_tot,
                 'Diferencia ($)': dif,
-                'Estado Conciliación': '🟢 Conciliado Exacto' if dif == 0 else '🟡 Diferencia en Monto'
+                'Estado Conciliación': estado
             })
         else:
             cruce_list.append({
@@ -316,10 +311,10 @@ def conciliar_informacion(df_cartola, df_ventas):
     return df_cruce, ventas_pendientes
 
 # -----------------------------------------------------------------------------
-# INTERFAZ STREAMLIT CON MANEJO DE ESTADO
+# INTERFAZ STREAMLIT
 # -----------------------------------------------------------------------------
 st.title("🏦 Sistema de Conciliación Bancaria Inteligente")
-st.markdown("Cruce estructurado por **Agrupación de RUT** y **Algoritmo de Sumas Exactas (1 a N)**.")
+st.markdown("Cruce estructurado por **Agrupación de RUT**, **Algoritmo de Sumas Exactas (1 a N)** y control de sobrepagos.")
 
 col1, col2 = st.columns(2)
 
@@ -339,9 +334,9 @@ if file_cartola and file_ventas:
         st.success("Archivos cargados correctamente.")
 
         if st.button("🚀 Ejecutar Conciliación Inteligente", type="primary"):
-            with st.spinner("Procesando cruce agrupado..."):
+            with st.spinner("Procesando cruce agrupado y buscando combinaciones exactas..."):
                 df_cruce, df_pendientes = conciliar_informacion(df_cartola, df_ventas)
-                # Persistir resultados en Session State
+                # Persistir resultados en Session State para la descarga
                 st.session_state['df_cruce'] = df_cruce
                 st.session_state['df_pendientes'] = df_pendientes
 
@@ -355,12 +350,12 @@ if file_cartola and file_ventas:
 
             m1, m2, m3, m4 = st.columns(4)
             tot_exactos = len(df_cruce[df_cruce['Estado Conciliación'] == '🟢 Conciliado Exacto'])
-            tot_diferencias = len(df_cruce[df_cruce['Estado Conciliación'] == '🟡 Diferencia en Monto'])
+            tot_diferencias = len(df_cruce[df_cruce['Estado Conciliación'].str.contains('🟡', na=False)])
             tot_no_encontrados = len(df_cruce[df_cruce['Estado Conciliación'] == '🔴 Abono No Identificado'])
             monto_no_ident = df_cruce[df_cruce['Estado Conciliación'] == '🔴 Abono No Identificado']['Monto Banco ($)'].sum()
 
             m1.metric("🟢 Conciliados Exactos", tot_exactos)
-            m2.metric("🟡 Dif. en Monto", tot_diferencias)
+            m2.metric("🟡 Pagos Parciales/Sobrepagos", tot_diferencias)
             m3.metric("🔴 No Identificados", tot_no_encontrados)
             m4.metric("💰 Mto. No Identificado", f"${monto_no_ident:,.0f}")
 
