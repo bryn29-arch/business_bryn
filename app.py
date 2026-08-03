@@ -69,7 +69,7 @@ st.markdown("""
 
 
 # ---------------------------------------------------------
-# FUNCIONES AUXILIARES DE EXTRACCIÓN Y LIMPIEZA ROBUSTAS
+# FUNCIONES AUXILIARES DE EXTRACCIÓN Y LIMPIEZA
 # ---------------------------------------------------------
 
 def limpiar_texto_para_match(texto):
@@ -158,7 +158,7 @@ def extraer_monto_chileno_estricto(texto_o_celda):
 
 
 def buscar_combinacion_facturas(df_cliente, monto_pago, max_facturas=3):
-    """Algoritmo de cuadratura 1:N optimizado para evitar cuelgues."""
+    """Busca súper rápido si la suma de hasta 3 facturas cuadra exacto."""
     if df_cliente.empty:
         return pd.DataFrame()
         
@@ -166,6 +166,7 @@ def buscar_combinacion_facturas(df_cliente, monto_pago, max_facturas=3):
     montos = df_cliente['Monto Total'].tolist()
     n = len(montos)
     
+    # Límite de seguridad: Si tiene más de 12 facturas, probar solo las 12 más recientes/relevantes
     if n > 12:
         folios = folios[:12]
         montos = montos[:12]
@@ -182,11 +183,12 @@ def buscar_combinacion_facturas(df_cliente, monto_pago, max_facturas=3):
 
 
 # ---------------------------------------------------------
-# PROCESAMIENTO Y CRUCE CON CACHÉ DE STREAMLIT
+# PROCESAMIENTO CON CACHÉ DE STREAMLIT (@st.cache_data)
 # ---------------------------------------------------------
 
 @st.cache_data(show_spinner=False)
 def normalizar_cartola_cached(file_bytes, nombre_archivo):
+    """Procesa la cartola desde memoria usando caché para no re-leer el PDF en cada clic."""
     registros_ok = []
     registros_dudosos = []
 
@@ -275,6 +277,7 @@ def normalizar_cartola_cached(file_bytes, nombre_archivo):
 
 @st.cache_data(show_spinner=False)
 def normalizar_ventas_cached(file_bytes, nombre_archivo):
+    """Procesa ventas desde memoria guardando resultado en caché."""
     try:
         if nombre_archivo.endswith(('.xlsx', '.xls')):
             df_raw = pd.read_excel(io.BytesIO(file_bytes))
@@ -382,57 +385,49 @@ def normalizar_ventas_cached(file_bytes, nombre_archivo):
 
 
 # ---------------------------------------------------------
-# LÓGICA COMPLETA DE CONCILIACIÓN CON MÁXIMA PRECISIÓN
+# CONCILIACIÓN AUTOMÁTICA
 # ---------------------------------------------------------
 
-@st.cache_data(show_spinner=False)
-def conciliar_informacion_flexible_cached(df_cartola, df_ventas):
-    """Mantiene la lógica detallada de matcheo de alta precisión pero acelerada con caché."""
+def conciliar_informacion_flexible(df_cartola, df_ventas):
     if df_cartola.empty or df_ventas is None or df_ventas.empty:
         return pd.DataFrame(), pd.DataFrame()
 
     cruce_list = []
     facturas_usadas = set()
 
-    # Pre-calculamos los nombres limpios en memoria para acelerar la comparación
-    df_ventas_calc = df_ventas.copy()
-    df_ventas_calc['N1_Limpio'] = df_ventas_calc['Nombre 1'].apply(limpiar_texto_para_match) if 'Nombre 1' in df_ventas_calc.columns else ""
-
     for idx_c, row_c in df_cartola.iterrows():
         id_cartola = str(row_c['Identificador / Cliente']).strip().upper()
         id_cartola_limpio = limpiar_texto_para_match(id_cartola)
         monto_pago = float(row_c['Monto Pago'])
         
-        ventas_disponibles = df_ventas_calc[~df_ventas_calc['Folio'].isin(facturas_usadas)].copy()
+        ventas_disponibles = df_ventas[~df_ventas['Folio'].isin(facturas_usadas)].copy()
         
         candidatos_cliente = pd.DataFrame()
         criterio_cliente = ""
 
-        # 1. Búsqueda por RUT 1
         if 'RUT 1' in ventas_disponibles.columns:
             m1 = ventas_disponibles[ventas_disponibles['RUT 1'].str.upper() == id_cartola]
             if not m1.empty:
                 candidatos_cliente = m1
                 criterio_cliente = "RUT 1"
 
-        # 2. Búsqueda por RUT 2
         if candidatos_cliente.empty and 'RUT 2' in ventas_disponibles.columns:
             m2 = ventas_disponibles[ventas_disponibles['RUT 2'].str.upper() == id_cartola]
             if not m2.empty:
                 candidatos_cliente = m2
                 criterio_cliente = "RUT 2"
 
-        # 3. Búsqueda por Nombre Flexible de Alta Precisión
         if candidatos_cliente.empty and len(id_cartola_limpio) >= 3:
-            mask_n1 = ventas_disponibles['N1_Limpio'].apply(lambda x: id_cartola_limpio in x or x in id_cartola_limpio if len(x) >= 3 else False)
-            if mask_n1.any():
-                candidatos_cliente = ventas_disponibles[mask_n1]
-                criterio_cliente = "Nombre 1 (Flex)"
+            if 'Nombre 1' in ventas_disponibles.columns:
+                n1_limpios = ventas_disponibles['Nombre 1'].apply(limpiar_texto_para_match)
+                mask_n1 = n1_limpios.apply(lambda x: id_cartola_limpio in x or x in id_cartola_limpio if len(x) >= 3 else False)
+                if mask_n1.any():
+                    candidatos_cliente = ventas_disponibles[mask_n1]
+                    criterio_cliente = "Nombre 1 (Flex)"
 
         match_encontrado = False
 
         if not candidatos_cliente.empty:
-            # Match 1:1 Exacto
             match_exacto_1a1 = candidatos_cliente[candidatos_cliente['Monto Total'] == monto_pago]
             
             if not match_exacto_1a1.empty:
@@ -452,7 +447,6 @@ def conciliar_informacion_flexible_cached(df_cartola, df_ventas):
                 match_encontrado = True
 
             else:
-                # Match Agrupado 1:N (Varias facturas suman el pago)
                 match_agrupado = buscar_combinacion_facturas(candidatos_cliente, monto_pago)
                 if not match_agrupado.empty:
                     folios_agrupados = ", ".join(match_agrupado['Folio'].astype(str).tolist())
@@ -474,12 +468,11 @@ def conciliar_informacion_flexible_cached(df_cartola, df_ventas):
                     })
                     match_encontrado = True
 
-        # 4. Fallback: Match Aproximado por Monto + Primeras letras del nombre
         if not match_encontrado and len(id_cartola_limpio) >= 3:
             match_por_monto = ventas_disponibles[ventas_disponibles['Monto Total'] == monto_pago]
             if not match_por_monto.empty:
                 for f_idx, f_row in match_por_monto.iterrows():
-                    n1 = f_row['N1_Limpio']
+                    n1 = limpiar_texto_para_match(str(f_row.get('Nombre 1', '')))
                     if (id_cartola_limpio[:4] in n1) or (n1[:4] in id_cartola_limpio):
                         facturas_usadas.add(f_row['Folio'])
                         cruce_list.append({
@@ -496,7 +489,6 @@ def conciliar_informacion_flexible_cached(df_cartola, df_ventas):
                         match_encontrado = True
                         break
 
-        # 5. Registros con diferencia o no encontrados
         if not match_encontrado:
             if not candidatos_cliente.empty:
                 f_row = candidatos_cliente.iloc[0]
@@ -663,8 +655,7 @@ df_pendientes_global = pd.DataFrame()
 
 with tab3:
     if not df_cartola_global.empty and df_ventas_global is not None and not df_ventas_global.empty:
-        # Ejecutamos la lógica completa y detallada usando caché para respuesta inmediata
-        df_cruce_global, df_pendientes_global = conciliar_informacion_flexible_cached(df_cartola_global, df_ventas_global)
+        df_cruce_global, df_pendientes_global = conciliar_informacion_flexible(df_cartola_global, df_ventas_global)
 
         col_m1, col_m2, col_m3 = st.columns(3)
         conciliados_count = len(df_cruce_global[df_cruce_global['Estado Conciliación'].str.contains('🟢')])
@@ -732,3 +723,4 @@ if not df_cartola_global.empty or df_ventas_global is not None:
                 mime="text/csv",
                 use_container_width=True
             )
+
