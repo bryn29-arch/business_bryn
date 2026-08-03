@@ -100,7 +100,7 @@ def extraer_rut_o_nombre(texto):
         body, dv = match_prov.group(1), match_prov.group(2).upper()
         return f"{int(body)}-{dv}"
 
-    match_std = re.search(r'\b(\d{1,2}(?:\.?\d{3}){2}-?[\dkK])\b', texto)
+    match_std = re.search(r'\b(\d{1,2}(?:\.\d{3}){2}-?[\dkK])\b', texto)
     if match_std:
         rut_raw = match_std.group(0).replace('.', '').upper()
         if '-' not in rut_raw:
@@ -390,7 +390,7 @@ def normalizar_ventas_cached(file_bytes, nombre_archivo):
 
 
 # ---------------------------------------------------------
-# LÓGICA DE CONCILIACIÓN MAX-MATCH (REFORZADA)
+# LÓGICA DE CONCILIACIÓN MAX-MATCH (REFORZADA CON NOMBRES UNIFICADOS)
 # ---------------------------------------------------------
 
 @st.cache_data(show_spinner=False)
@@ -405,12 +405,21 @@ def conciliar_informacion_flexible_cached(df_cartola, df_ventas):
     df_v = df_ventas.copy()
     df_v['RUT1_Clean'] = df_v['RUT 1'].apply(normalizar_rut_clave) if 'RUT 1' in df_v.columns else ""
     df_v['RUT2_Clean'] = df_v['RUT 2'].apply(normalizar_rut_clave) if 'RUT 2' in df_v.columns else ""
-    df_v['N1_Limpio'] = df_v['Nombre 1'].apply(limpiar_texto_para_match) if 'Nombre 1' in df_v.columns else ""
+    
+    # Limpieza super agresiva de nombres: elimina siglas Y ESPACIOS ("PRO DRILLING" -> "PRODRILLING")
+    def limpiar_super_agresivo(texto):
+        if not isinstance(texto, str) or not texto.strip():
+            return ""
+        t = limpiar_texto_para_match(texto) # quita S.A., LTDA, etc.
+        return re.sub(r'\s+', '', t).upper() # quita todos los espacios
+
+    df_v['N1_Limpio'] = df_v['Nombre 1'].apply(limpiar_super_agresivo) if 'Nombre 1' in df_v.columns else ""
+    df_v['N2_Limpio'] = df_v['Nombre 2'].apply(limpiar_super_agresivo) if 'Nombre 2' in df_v.columns else ""
 
     for idx_c, row_c in df_cartola.iterrows():
         id_cartola = str(row_c['Identificador / Cliente']).strip().upper()
         id_cartola_clean = normalizar_rut_clave(id_cartola)
-        id_cartola_limpio_texto = limpiar_texto_para_match(id_cartola)
+        id_cartola_limpio_texto = limpiar_super_agresivo(id_cartola)
         monto_pago = float(row_c['Monto Pago'])
         
         # Filtrar solo facturas no asignadas previamente
@@ -419,7 +428,7 @@ def conciliar_informacion_flexible_cached(df_cartola, df_ventas):
         candidatos_cliente = pd.DataFrame()
         criterio_cliente = ""
 
-        # CAPA 1: Match por RUT Normalizado (Ignora puntos, guiones y ceros a la izquierda)
+        # CAPA 1: Match por RUT Normalizado
         if len(id_cartola_clean) >= 7:
             m1 = ventas_disponibles[ventas_disponibles['RUT1_Clean'] == id_cartola_clean]
             if not m1.empty:
@@ -431,14 +440,21 @@ def conciliar_informacion_flexible_cached(df_cartola, df_ventas):
                     candidatos_cliente = m2
                     criterio_cliente = "RUT 2"
 
-        # CAPA 2: Match por Nombre Flexible (Inclusión mutua de sub-cadenas)
+        # CAPA 2: Match por Nombre Flexible (Evalúa Nombre 1 y Nombre 2 ignorando espacios)
         if candidatos_cliente.empty and len(id_cartola_limpio_texto) >= 3:
             mask_n1 = ventas_disponibles['N1_Limpio'].apply(
                 lambda x: (id_cartola_limpio_texto in x or x in id_cartola_limpio_texto) if len(x) >= 3 else False
             )
+            mask_n2 = ventas_disponibles['N2_Limpio'].apply(
+                lambda x: (id_cartola_limpio_texto in x or x in id_cartola_limpio_texto) if len(x) >= 3 else False
+            )
+            
             if mask_n1.any():
                 candidatos_cliente = ventas_disponibles[mask_n1]
-                criterio_cliente = "Nombre Flexible"
+                criterio_cliente = "Nombre 1"
+            elif mask_n2.any():
+                candidatos_cliente = ventas_disponibles[mask_n2]
+                criterio_cliente = "Nombre 2"
 
         match_encontrado = False
 
@@ -454,7 +470,7 @@ def conciliar_informacion_flexible_cached(df_cartola, df_ventas):
                     'Identificador Cartola': id_cartola,
                     'Monto Banco ($)': monto_pago,
                     'Folios Factura(s)': f_row['Folio'],
-                    'Entidad Matcheada': f_row.get('Nombre 1', f_row.get('Nombre 2', 'N/A')),
+                    'Entidad Matcheada': f_row.get('Nombre 2', f_row.get('Nombre 1', 'N/A')),
                     'Match Por': f"{criterio_cliente} (Exacto 1:1)",
                     'Monto Factura ($)': f_row['Monto Total'],
                     'Diferencia ($)': 0,
@@ -477,7 +493,7 @@ def conciliar_informacion_flexible_cached(df_cartola, df_ventas):
                         'Identificador Cartola': id_cartola,
                         'Monto Banco ($)': monto_pago,
                         'Folios Factura(s)': folios_agrupados,
-                        'Entidad Matcheada': f_row.get('Nombre 1', f_row.get('Nombre 2', 'N/A')),
+                        'Entidad Matcheada': f_row.get('Nombre 2', f_row.get('Nombre 1', 'N/A')),
                         'Match Por': f"{criterio_cliente} (Pago Agrupado 1:N - {len(match_agrupado)} Facturas)",
                         'Monto Factura ($)': monto_total_facturas,
                         'Diferencia ($)': 0,
@@ -485,22 +501,24 @@ def conciliar_informacion_flexible_cached(df_cartola, df_ventas):
                     })
                     match_encontrado = True
 
-        # CAPA 3: Match Global por Monto Exacto + Coincidencia Parcial de Nombre
+        # CAPA 3: Match Global por Monto Exacto + Coincidencia Nombre Símil
         if not match_encontrado:
             match_monto_global = ventas_disponibles[ventas_disponibles['Monto Total'] == monto_pago]
             if not match_monto_global.empty:
                 for f_idx, f_row in match_monto_global.iterrows():
-                    nom_limpio = f_row['N1_Limpio']
-                    if len(id_cartola_limpio_texto) >= 3 and len(nom_limpio) >= 3:
-                        if (id_cartola_limpio_texto[:3] in nom_limpio) or (nom_limpio[:3] in id_cartola_limpio_texto):
+                    nom1 = f_row['N1_Limpio']
+                    nom2 = f_row['N2_Limpio']
+                    if len(id_cartola_limpio_texto) >= 3:
+                        if (nom1 and (id_cartola_limpio_texto in nom1 or nom1 in id_cartola_limpio_texto)) or \
+                           (nom2 and (id_cartola_limpio_texto in nom2 or nom2 in id_cartola_limpio_texto)):
                             facturas_usadas.add(f_row['Folio'])
                             cruce_list.append({
                                 'Fecha Banco': row_c['Fecha'],
                                 'Identificador Cartola': id_cartola,
                                 'Monto Banco ($)': monto_pago,
                                 'Folios Factura(s)': f_row['Folio'],
-                                'Entidad Matcheada': f_row.get('Nombre 1', 'N/A'),
-                                'Match Por': 'Monto Exacto + Coincidencia Nombre',
+                                'Entidad Matcheada': f_row.get('Nombre 2', f_row.get('Nombre 1', 'N/A')),
+                                'Match Por': 'Monto Exacto + Nombre Símil',
                                 'Monto Factura ($)': f_row['Monto Total'],
                                 'Diferencia ($)': 0,
                                 'Estado Conciliación': '🟢 Conciliado Exacto'
@@ -508,7 +526,7 @@ def conciliar_informacion_flexible_cached(df_cartola, df_ventas):
                             match_encontrado = True
                             break
 
-        # CAPA 4: Si hubo cliente pero no cuadró el monto (Diferencia de pago)
+        # CAPA 4: Si hubo cliente pero no cuadró el monto
         if not match_encontrado:
             if not candidatos_cliente.empty:
                 f_row = candidatos_cliente.iloc[0]
@@ -519,7 +537,7 @@ def conciliar_informacion_flexible_cached(df_cartola, df_ventas):
                     'Identificador Cartola': id_cartola,
                     'Monto Banco ($)': monto_pago,
                     'Folios Factura(s)': f_row['Folio'],
-                    'Entidad Matcheada': f_row.get('Nombre 1', f_row.get('Nombre 2', 'N/A')),
+                    'Entidad Matcheada': f_row.get('Nombre 2', f_row.get('Nombre 1', 'N/A')),
                     'Match Por': criterio_cliente,
                     'Monto Factura ($)': f_row['Monto Total'],
                     'Diferencia ($)': dif,
@@ -743,4 +761,3 @@ if not df_cartola_global.empty or df_ventas_global is not None:
                 mime="text/csv",
                 use_container_width=True
             )
-
