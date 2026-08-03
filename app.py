@@ -699,4 +699,3 @@ if not df_cartola_global.empty or df_ventas_global is not None:
                 mime="text/csv",
                 use_container_width=True
             )
-
