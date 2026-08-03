@@ -145,13 +145,19 @@ def conciliar_informacion(df_cartola, df_ventas):
     indices_ventas_usados = set()
     df_ventas_prep = df_ventas.copy()
     
-    # Identificación automática de columnas robusta
+   # ---------------------------------------------------------------------
+    # IDENTIFICACIÓN DE COLUMNAS (Corregido para priorizar RUT Deudor)
+    # ---------------------------------------------------------------------
     col_cliente_v = encontrar_columna(df_ventas_prep.columns, ['DEUDOR', 'CLIENTE', 'RAZON']) or df_ventas_prep.columns[0]
-    col_rut_v = encontrar_columna(df_ventas_prep.columns, ['RUT'])
+    
+    # Se prioriza estrictamente la columna del deudor antes que la del cliente
+    col_rut_v = encontrar_columna(df_ventas_prep.columns, ['RUT DEUDOR', 'RUT. DEUDOR', 'RUT_DEUDOR', 'RUT DEU', 'RUT'])
+    
     col_monto_v = encontrar_columna(df_ventas_prep.columns, ['ADEUDADO', 'MONTO TOT', 'MONTO', 'SALDO'])
     col_folio_v = encontrar_columna(df_ventas_prep.columns, ['DOC', 'FOLIO', 'FACTURA', 'NUMERO'])
-    
     col_monto_c = encontrar_columna(df_cartola.columns, ['ABONO', 'DEPOSITO', 'CREDITO', 'MONTO'])
+
+    # ... [MANTENER LA PARTE DE NORMALIZACIÓN DE TEXTOS Y MONTOS IGUAL] ...
 
     # Preprocesar textos, RUTs y montos en cartera
     df_ventas_prep['Fila_Texto'] = df_ventas_prep.apply(lambda r: " ".join([str(v) for v in r.values if pd.notna(v)]), axis=1)
@@ -181,28 +187,52 @@ def conciliar_informacion(df_cartola, df_ventas):
         ventas_disponibles = df_ventas_prep[~df_ventas_prep.index.isin(indices_ventas_usados)]
 
         # ---------------------------------------------------------------------
-        # CAPA 1: BÚSQUEDA STRICTA POR RUT
+        # CAPA 1 MEJORADA: BÚSQUEDA STRICTA POR RUT (CON SOBREPAGOS Y ABONOS)
         # ---------------------------------------------------------------------
         if rut_c and monto_banco > 0:
             cand_rut = ventas_disponibles[ventas_disponibles['RUT_Norm'] == rut_c]
             
             if not cand_rut.empty:
+                suma_total_rut = cand_rut['Monto_Real'].sum()
+                
                 # Caso A: Factura única con monto exacto
                 exacto_1a1 = cand_rut[cand_rut['Monto_Real'] == monto_banco]
                 if not exacto_1a1.empty:
                     match_indices = [exacto_1a1.index[0]]
-                    tipo_match = "RUT Exacto (1:1)"
+                    tipo_match = "🟢 RUT Exacto (1:1)"
+                
                 else:
-                    # Caso B: Suma de TODAS las facturas pendientes de este RUT
-                    if cand_rut['Monto_Real'].sum() == monto_banco:
+                    # Caso B: Buscar combinación matemática exacta (Subset Sum)
+                    combo = buscar_combinacion_exacta(cand_rut, monto_banco, col_monto='Monto_Real')
+                    if combo:
+                        match_indices = combo
+                        tipo_match = f"🟢 RUT Pago Agrupado Exacto (1:{len(combo)})"
+                    
+                    # Caso C: SOBREPAGO (El cliente depositó más dinero del que debe en la cartera)
+                    elif monto_banco >= suma_total_rut:
+                        # Agrupamos TODAS las facturas del cliente. Quedará una diferencia a favor en la cartola.
                         match_indices = cand_rut.index.tolist()
-                        tipo_match = f"RUT Todas las Facturas (1:{len(match_indices)})"
+                        tipo_match = f"🟡 RUT Sobrepago / Pago Total (1:{len(match_indices)})"
+                    
+                    # Caso D: ABONO PARCIAL (El cliente pagó menos, no hay suma exacta)
                     else:
-                        # Caso C: Buscar combinación específica (Subset Sum)
-                        combo = buscar_combinacion_exacta(cand_rut, monto_banco, col_monto='Monto_Real')
-                        if combo:
-                            match_indices = combo
-                            tipo_match = f"RUT Pago Agrupado (1:{len(combo)})"
+                        # Ordenamos de mayor a menor e intentamos cubrir la mayor cantidad de facturas posibles
+                        cand_ordenado = cand_rut.sort_values(by='Monto_Real', ascending=False)
+                        temp_indices = []
+                        suma_temp = 0
+                        
+                        for idx_v, row_v in cand_ordenado.iterrows():
+                            if (suma_temp + row_v['Monto_Real']) <= monto_banco:
+                                suma_temp += row_v['Monto_Real']
+                                temp_indices.append(idx_v)
+                        
+                        if temp_indices:
+                            match_indices = temp_indices
+                            tipo_match = f"🟡 RUT Abono Parcial Agrupado (1:{len(temp_indices)})"
+                        else:
+                            # Si el pago no cubre ni siquiera la factura más pequeña, se asigna a la menor
+                            match_indices = [cand_ordenado.index[-1]]
+                            tipo_match = "🟡 RUT Abono a Factura Menor"
 
         # ---------------------------------------------------------------------
         # CAPA 2: BÚSQUEDA AGRUPADA POR NOMBRE DE CLIENTE / TEXTO (UMBRAL MÁS ESTRICTO)
