@@ -11,7 +11,7 @@ import io
 # CONFIGURACIÓN DE PÁGINA
 # -----------------------------------------------------------------------------
 st.set_page_config(
-    page_title="Conciliación Bancaria Avanzada - Sumas Asertivas",
+    page_title="Conciliación Bancaria Avanzada - Corrección de Sumas",
     page_icon="📊",
     layout="wide"
 )
@@ -20,18 +20,10 @@ st.set_page_config(
 # DICCIONARIOS Y FUNCIONES DE TEXTO Y MONTO
 # -----------------------------------------------------------------------------
 ABREVIATURAS = {
-    'CORP': 'CORPORACION',
-    'EDUC': 'EDUCACION',
-    'LIMITADA': 'LTDA',
-    'SOCIEDAD': 'SOC',
-    'ANONIMA': 'SA',
-    'HERMANOS': 'HROS',
-    'EIRL': '',
-    'SPA': '',
-    'S': 'SPA',          
-    'EXP': 'EXPORTACION', 
-    'ING': 'INGENIERIA',
-    'SERV': 'SERVICIOS'
+    'CORP': 'CORPORACION', 'EDUC': 'EDUCACION', 'LIMITADA': 'LTDA',
+    'SOCIEDAD': 'SOC', 'ANONIMA': 'SA', 'HERMANOS': 'HROS',
+    'EIRL': '', 'SPA': '', 'S': 'SPA', 'EXP': 'EXPORTACION', 
+    'ING': 'INGENIERIA', 'SERV': 'SERVICIOS'
 }
 
 def extraer_rut(texto):
@@ -47,18 +39,14 @@ def expandir_y_limpiar_texto(texto):
     """Normaliza texto, remueve acentos y estandariza abreviaturas."""
     if not isinstance(texto, str) or pd.isna(texto):
         return ""
-    
     texto = unicodedata.normalize('NFD', str(texto)).encode('ascii', 'ignore').decode("utf-8").upper()
     texto = re.sub(r'[^A-Z0-9\s]', ' ', texto)
-    
     palabras = texto.split()
     palabras_norm = [ABREVIATURAS.get(p, p) for p in palabras]
-    texto_norm = " ".join(palabras_norm)
-    
-    return re.sub(r'\s+', ' ', texto_norm).strip()
+    return re.sub(r'\s+', ' ', " ".join(palabras_norm)).strip()
 
 def extraer_tokens_clave(texto_fila):
-    """Extrae tokens significativos de 2 o más caracteres."""
+    """Extrae palabras relevantes de 2 o más caracteres."""
     texto_clean = expandir_y_limpiar_texto(texto_fila)
     palabras = set(re.findall(r'\b[A-Z0-9]{2,}\b', texto_clean))
     stopwords = {
@@ -69,69 +57,68 @@ def extraer_tokens_clave(texto_fila):
     return palabras - stopwords
 
 def calcular_similitud_textual(texto1, texto2):
-    """Evalúa coincidencia combinando contención directa, Jaccard por tokens y Fuzzy Ratio."""
+    """Evalúa coincidencia borrosa entre cadenas de texto."""
     if not texto1 or not texto2:
         return 0.0
-    
     t1 = expandir_y_limpiar_texto(texto1)
     t2 = expandir_y_limpiar_texto(texto2)
-    
     if not t1 or not t2:
         return 0.0
-        
-    if len(t1) >= 4 and len(t2) >= 4:
-        if t1 in t2 or t2 in t1:
-            return 0.95
-
+    if len(t1) >= 4 and len(t2) >= 4 and (t1 in t2 or t2 in t1):
+        return 0.95
     tokens1 = extraer_tokens_clave(t1)
     tokens2 = extraer_tokens_clave(t2)
-    
     if tokens1 and tokens2:
         interseccion = tokens1.intersection(tokens2)
         union = tokens1.union(tokens2)
-        ratio_jaccard = len(interseccion) / len(union) if union else 0.0
-        
+        ratio = len(interseccion) / len(union) if union else 0.0
         if len(interseccion) >= 2:
-            return max(0.85, ratio_jaccard)
-        if len(interseccion) == 1:
-            token_comun = list(interseccion)[0]
-            if len(token_comun) >= 4:
-                return max(0.75, ratio_jaccard)
-            if ratio_jaccard > 0.3:
-                return 0.70
-            
+            return max(0.85, ratio)
+        if len(interseccion) == 1 and len(list(interseccion)[0]) >= 4:
+            return max(0.75, ratio)
     return SequenceMatcher(None, t1, t2).ratio()
 
-def extraer_montos_de_fila(row):
-    """Extrae todos los números/montos válidos de las celdas de una fila."""
-    montos = []
-    for val in row.values:
-        if pd.isna(val):
-            continue
-        if isinstance(val, (int, float)):
-            if abs(val) > 0:
-                montos.append(abs(float(val)))
+def limpiar_monto_celda(val):
+    """Convierte un valor individual a flotante limpio."""
+    if pd.isna(val):
+        return 0.0
+    if isinstance(val, (int, float)):
+        return abs(float(val))
+    val_str = str(val).strip().replace('$', '').replace(' ', '')
+    if ',' in val_str and '.' in val_str:
+        if val_str.rfind('.') < val_str.rfind(','):
+            val_str = val_str.replace('.', '').replace(',', '.')
         else:
-            val_str = str(val).strip().replace('$', '').replace(' ', '')
-            if ',' in val_str and '.' in val_str:
-                if val_str.rfind('.') < val_str.rfind(','):
-                    val_str = val_str.replace('.', '').replace(',', '.')
-                else:
-                    val_str = val_str.replace(',', '')
-            elif ',' in val_str:
-                val_str = val_str.replace(',', '.')
-            
-            val_str = re.sub(r'[^0-9.-]', '', val_str)
-            try:
-                num = float(val_str)
-                if abs(num) > 0:
-                    montos.append(abs(num))
-            except ValueError:
-                pass
-    return montos
+            val_str = val_str.replace(',', '')
+    elif ',' in val_str:
+        val_str = val_str.replace(',', '.')
+    val_str = re.sub(r'[^0-9.-]', '', val_str)
+    try:
+        return abs(float(val_str))
+    except ValueError:
+        return 0.0
+
+def obtener_monto_de_fila(row, col_monto_nom=None):
+    """
+    Garantiza extraer el MONTO REAL de la fila y NO el número de documento.
+    Si existe una columna identificada como monto la usa; si no, toma el valor más lógico.
+    """
+    if col_monto_nom and col_monto_nom in row.index:
+        return limpiar_monto_celda(row[col_monto_nom])
+    
+    # Si no se especifica columna, extraer numéricos y descartar folios típicos
+    cand = []
+    for val in row.values:
+        m = limpiar_monto_celda(val)
+        if m > 0:
+            cand.append(m)
+    if cand:
+        # Por lo general, el monto de la factura es mayor que el número de folio
+        return max(cand)
+    return 0.0
 
 # -----------------------------------------------------------------------------
-# ALGORITMO DE CONCILIACIÓN CON LÓGICA DE SUMA REFORZADA
+# ALGORITMO DE CONCILIACIÓN CON SUMAS CORREGIDAS
 # -----------------------------------------------------------------------------
 
 @st.cache_data
@@ -144,20 +131,27 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
 
     # Preprocesamiento de Ventas
     df_ventas_prep = df_ventas.copy()
+    
+    # Mapeo Inteligente de Columnas Clave
+    col_monto_v = next((c for c in ['Monto tot', 'Monto Total', 'Monto', 'Total', 'Saldo', 'VALOR'] if c in df_ventas_prep.columns), None)
+    col_folio_v = next((c for c in ['Documento', 'Folio', 'N° Factura', 'Numero', 'Factura', 'ID', 'FOLIO'] if c in df_ventas_prep.columns), None)
+    col_cliente_v = next((c for c in ['Deudor', 'Nombre 2', 'Nombre Cliente', 'Cliente', 'Razon Social', 'NOMBRE'] if c in df_ventas_prep.columns), df_ventas_prep.columns[0])
+
+    col_monto_c = next((c for c in ['Abono', 'Monto', 'Crédito', 'Credito', 'Deposito', 'DEPOSITO'] if c in df_cartola.columns), None)
+
     df_ventas_prep['Fila_Texto'] = df_ventas_prep.apply(lambda r: " ".join([str(v) for v in r.values if pd.notna(v)]), axis=1)
     df_ventas_prep['Fila_Texto_Norm'] = df_ventas_prep['Fila_Texto'].apply(expandir_y_limpiar_texto)
     df_ventas_prep['RUT_Norm'] = df_ventas_prep['Fila_Texto'].apply(extraer_rut)
-    df_ventas_prep['Fila_Montos'] = df_ventas_prep.apply(extraer_montos_de_fila, axis=1)
     
-    col_folio_v = next((c for c in ['Documento', 'Folio', 'N° Factura', 'Numero', 'Factura', 'ID', 'FOLIO'] if c in df_ventas_prep.columns), None)
-    col_cliente_v = next((c for c in ['Deudor', 'Nombre 2', 'Nombre Cliente', 'Cliente', 'Razon Social', 'NOMBRE'] if c in df_ventas_prep.columns), df_ventas_prep.columns[0])
+    # EXTRAER MONTO PURO Y UNICO POR FILA
+    df_ventas_prep['Monto_Real'] = df_ventas_prep.apply(lambda r: obtener_monto_de_fila(r, col_monto_v), axis=1)
 
     for idx_c, row_c in df_cartola.iterrows():
         texto_c_raw = " ".join([str(v) for v in row_c.values if pd.notna(v)])
         texto_c_norm = expandir_y_limpiar_texto(texto_c_raw)
         rut_c = extraer_rut(texto_c_raw)
-        montos_c = extraer_montos_de_fila(row_c)
-        monto_banco = montos_c[0] if montos_c else 0.0
+        
+        monto_banco = obtener_monto_de_fila(row_c, col_monto_c)
 
         match_indices = []
         tipo_match = "Sin Coincidencia"
@@ -165,9 +159,9 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
         ventas_disponibles = df_ventas_prep[~df_ventas_prep.index.isin(indices_ventas_usados)]
 
         # =====================================================================
-        # ESTRATEGIA 0: EVALUACIÓN POR RUT (PROBAR 1:1 Y 1:N BUSCANDO CUADRE EXACTO)
+        # ESTRATEGIA 0: EVALUACIÓN POR RUT CON SUMA COMBINATORIA REAL
         # =====================================================================
-        if rut_c:
+        if rut_c and monto_banco > 0:
             cand_rut = ventas_disponibles[ventas_disponibles['RUT_Norm'] == rut_c]
             
             if not cand_rut.empty:
@@ -177,10 +171,9 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
                 # Probar combinaciones de 1 hasta 15 facturas del MISMO RUT
                 for r in range(1, min(15, len(indices_cand_rut) + 1)):
                     for combo in combinations(indices_cand_rut, r):
-                        suma_combo = sum(
-                            df_ventas_prep.loc[i, 'Fila_Montos'][0] 
-                            for i in combo if df_ventas_prep.loc[i, 'Fila_Montos']
-                        )
+                        # SUMA MONETARIA DIRECTA DE CADA FACTURA DEL COMBO
+                        suma_combo = sum(df_ventas_prep.loc[i, 'Monto_Real'] for i in combo)
+                        
                         if abs(monto_banco - suma_combo) < 1.0:
                             match_indices = list(combo)
                             tipo_match = f"RUT 1 (Pago Agrupado 1:{len(combo)})" if len(combo) > 1 else "RUT 1 (Exacto 1:1)"
@@ -192,10 +185,10 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
         # =====================================================================
         # ESTRATEGIA 1: TEXTO FLEX + MONTO EXACTO (1 a 1)
         # =====================================================================
-        if not match_indices:
+        if not match_indices and monto_banco > 0:
             for idx_v, row_v in ventas_disponibles.iterrows():
                 similitud_texto = calcular_similitud_textual(texto_c_norm, row_v['Fila_Texto_Norm'])
-                coincide_monto = any(abs(monto_banco - mv) < 1.0 for mv in row_v['Fila_Montos'])
+                coincide_monto = abs(monto_banco - row_v['Monto_Real']) < 1.0
 
                 if similitud_texto >= 0.50 and coincide_monto:
                     match_indices = [idx_v]
@@ -203,7 +196,7 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
                     break
 
         # =====================================================================
-        # ESTRATEGIA 2: TEXTO REFORZADO + SUMA AGRUPADA (1 a N por Nombre)
+        # ESTRATEGIA 2: SUMA AGRUPADA POR NOMBRE (1 a N)
         # =====================================================================
         if not match_indices and monto_banco > 0:
             candidatos_cliente = []
@@ -216,10 +209,7 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
                 encontrado_grupo = False
                 for r in range(2, min(8, len(candidatos_cliente) + 1)):
                     for combo in combinations(candidatos_cliente, r):
-                        suma_combo = sum(
-                            df_ventas_prep.loc[i, 'Fila_Montos'][0] 
-                            for i in combo if df_ventas_prep.loc[i, 'Fila_Montos']
-                        )
+                        suma_combo = sum(df_ventas_prep.loc[i, 'Monto_Real'] for i in combo)
                         if abs(monto_banco - suma_combo) < 1.0:
                             match_indices = list(combo)
                             tipo_match = f"Agrupado (1 a {len(combo)}): Suma Facturas Cuadrada"
@@ -234,7 +224,7 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
         if not match_indices and monto_banco > 0:
             candidatos_monto = []
             for idx_v, row_v in ventas_disponibles.iterrows():
-                if any(abs(monto_banco - mv) < 1.0 for mv in row_v['Fila_Montos']):
+                if abs(monto_banco - row_v['Monto_Real']) < 1.0:
                     similitud = calcular_similitud_textual(texto_c_norm, row_v['Fila_Texto_Norm'])
                     candidatos_monto.append((idx_v, similitud))
 
@@ -256,7 +246,7 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
             
             folios = ", ".join([str(r[col_folio_v]) if col_folio_v else f"FILA-{i+1}" for i, r in rows_matched.iterrows()])
             entidad = rows_matched.iloc[0][col_cliente_v]
-            monto_factura_total = sum([r['Fila_Montos'][0] for _, r in rows_matched.iterrows() if r['Fila_Montos']])
+            monto_factura_total = rows_matched['Monto_Real'].sum()
             
             dif = monto_banco - monto_factura_total
 
@@ -312,7 +302,7 @@ if file_cartola and file_ventas:
         st.success("Archivos cargados correctamente.")
 
         if st.button("🚀 Ejecutar Conciliación Inteligente", type="primary"):
-            with st.spinner("Ejecutando cruce con lógica de suma reforzada..."):
+            with st.spinner("Ejecutando cruce con valores numéricos aislados..."):
                 df_cruce, df_pendientes = conciliar_informacion_flexible(df_cartola, df_ventas)
 
             st.divider()
