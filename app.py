@@ -388,13 +388,13 @@ def normalizar_ventas(archivo_subido):
 
 
 # ---------------------------------------------------------
-# CONCILIACIÓN AUTOMÁTICA FLEXIBLE
+# CONCILIACIÓN AUTOMÁTICA FLEXIBLE (ACTUALIZADA)
 # ---------------------------------------------------------
 
 def conciliar_informacion_flexible(df_cartola, df_ventas):
     """
     Conciliación automática 1 a 1 tolerando diferencias de formato en nombres
-    (ej: 'Pro Drilling S A' vs 'PRODRILLING S.A').
+    y múltiples abonos/facturas del mismo cliente.
     """
     if df_cartola.empty or df_ventas is None or df_ventas.empty:
         return pd.DataFrame(), pd.DataFrame()
@@ -407,83 +407,84 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
         id_cartola_limpio = limpiar_texto_para_match(id_cartola)
         monto_pago = float(row_c['Monto Pago'])
         
+        # Filtrar solo facturas no asignadas previamente
         ventas_disponibles = df_ventas[~df_ventas['Folio'].isin(facturas_usadas)].copy()
         
-        coincidencias = pd.DataFrame()
+        coincidencias_cliente = pd.DataFrame()
         criterio_encontrado = ""
 
-        # --- BÚSQUEDA 1: Match por RUT 1 / RUT 2 ---
+        # --- PASO 1: Identificar todas las facturas del CLIENTE ---
+        
+        # 1.1 Match por RUT 1 o RUT 2
         if 'RUT 1' in ventas_disponibles.columns:
-            coincidencias = ventas_disponibles[ventas_disponibles['RUT 1'].str.upper() == id_cartola]
-            if not coincidencias.empty:
+            coincidencias_cliente = ventas_disponibles[ventas_disponibles['RUT 1'].str.upper() == id_cartola]
+            if not coincidencias_cliente.empty:
                 criterio_encontrado = "RUT 1"
 
-        if coincidencias.empty and 'RUT 2' in ventas_disponibles.columns:
-            coincidencias = ventas_disponibles[ventas_disponibles['RUT 2'].str.upper() == id_cartola]
-            if not coincidencias.empty:
+        if coincidencias_cliente.empty and 'RUT 2' in ventas_disponibles.columns:
+            coincidencias_cliente = ventas_disponibles[ventas_disponibles['RUT 2'].str.upper() == id_cartola]
+            if not coincidencias_cliente.empty:
                 criterio_encontrado = "RUT 2"
 
-        # --- BÚSQUEDA 2: Match por Nombre 1 / Nombre 2 (Con Limpieza Agresiva) ---
-        if coincidencias.empty and len(id_cartola_limpio) >= 3:
+        # 1.2 Match por Nombre Flexible (Pro Drilling S A == PRODRILLING S.A)
+        if coincidencias_cliente.empty and len(id_cartola_limpio) >= 3:
             if 'Nombre 1' in ventas_disponibles.columns:
                 nombres_1_limpios = ventas_disponibles['Nombre 1'].apply(limpiar_texto_para_match)
-                mask_n1 = nombres_1_limpios.apply(lambda x: id_cartola_limpio in x or x in id_cartola_limpio if len(x) >= 3 else False)
-                coincidencias = ventas_disponibles[mask_n1]
-                if not coincidencias.empty:
-                    criterio_encontrado = "Nombre 1 (Flex)"
+                mask_n1 = nombres_1_limpios.apply(lambda x: (id_cartola_limpio in x or x in id_cartola_limpio) if len(x) >= 3 else False)
+                coincidencias_cliente = ventas_disponibles[mask_n1]
+                if not coincidencias_cliente.empty:
+                    criterio_encontrado = "Nombre (Flex)"
 
-            if coincidencias.empty and 'Nombre 2' in ventas_disponibles.columns:
+            if coincidencias_cliente.empty and 'Nombre 2' in ventas_disponibles.columns:
                 nombres_2_limpios = ventas_disponibles['Nombre 2'].apply(limpiar_texto_para_match)
-                mask_n2 = nombres_2_limpios.apply(lambda x: id_cartola_limpio in x or x in id_cartola_limpio if len(x) >= 3 else False)
-                coincidencias = ventas_disponibles[mask_n2]
-                if not coincidencias.empty:
-                    criterio_encontrado = "Nombre 2 (Flex)"
+                mask_n2 = nombres_2_limpios.apply(lambda x: (id_cartola_limpio in x or x in id_cartola_limpio) if len(x) >= 3 else False)
+                coincidencias_cliente = ventas_disponibles[mask_n2]
+                if not coincidencias_cliente.empty:
+                    criterio_encontrado = "Nombre (Flex)"
 
-        # --- BÚSQUEDA 3: Rescate por Monto Exacto + Similitud de Texto ---
-        if coincidencias.empty and len(id_cartola_limpio) >= 3:
-            match_por_monto = ventas_disponibles[ventas_disponibles['Monto Total'] == monto_pago]
-            if not match_por_monto.empty:
-                for f_idx, f_row in match_por_monto.iterrows():
-                    n1 = limpiar_texto_para_match(str(f_row.get('Nombre 1', '')))
-                    n2 = limpiar_texto_para_match(str(f_row.get('Nombre 2', '')))
-                    if (id_cartola_limpio[:4] in n1) or (id_cartola_limpio[:4] in n2) or (n1[:4] in id_cartola_limpio):
-                        coincidencias = match_por_monto.loc[[f_idx]]
-                        criterio_encontrado = "Monto + Nombre Aprox"
-                        break
+        # --- PASO 2: Buscar la factura específica por MONTO dentro del cliente ---
+        match_final = pd.DataFrame()
 
-        # --- EVALUAR RESULTADO Y ASIGNAR ---
-        if not coincidencias.empty:
-            match_exacto = coincidencias[coincidencias['Monto Total'] == monto_pago]
-            
+        if not coincidencias_cliente.empty:
+            # Buscar el monto exacto dentro de las facturas de ese cliente
+            match_exacto = coincidencias_cliente[coincidencias_cliente['Monto Total'] == monto_pago]
             if not match_exacto.empty:
-                f_row = match_exacto.iloc[0]
-                facturas_usadas.add(f_row['Folio'])
-                cruce_list.append({
-                    'Fecha Banco': row_c['Fecha'],
-                    'Identificador Cartola': id_cartola,
-                    'Monto Banco ($)': monto_pago,
-                    'Folio Factura': f_row['Folio'],
-                    'Entidad Matcheada': f_row.get('Nombre 1', f_row.get('Nombre 2', 'N/A')),
-                    'Match Por': criterio_encontrado,
-                    'Monto Factura ($)': f_row['Monto Total'],
-                    'Diferencia ($)': 0,
-                    'Estado Conciliación': '🟢 Conciliado Exacto'
-                })
+                match_final = match_exacto.head(1)
             else:
-                f_row = coincidencias.iloc[0]
-                facturas_usadas.add(f_row['Folio'])
-                dif = monto_pago - f_row['Monto Total']
-                cruce_list.append({
-                    'Fecha Banco': row_c['Fecha'],
-                    'Identificador Cartola': id_cartola,
-                    'Monto Banco ($)': monto_pago,
-                    'Folio Factura': f_row['Folio'],
-                    'Entidad Matcheada': f_row.get('Nombre 1', f_row.get('Nombre 2', 'N/A')),
-                    'Match Por': criterio_encontrado,
-                    'Monto Factura ($)': f_row['Monto Total'],
-                    'Diferencia ($)': dif,
-                    'Estado Conciliación': '🟡 Diferencia en Monto'
-                })
+                # Si no hay monto exacto, tomar la primera factura del cliente para marcar diferencia
+                match_final = coincidencias_cliente.head(1)
+        else:
+            # Si no pilló al cliente por nombre, busca si hay ALGUNA factura en general con ese monto exacto
+            if len(id_cartola_limpio) >= 3:
+                match_por_monto = ventas_disponibles[ventas_disponibles['Monto Total'] == monto_pago]
+                if not match_por_monto.empty:
+                    for f_idx, f_row in match_por_monto.iterrows():
+                        n1 = limpiar_texto_para_match(str(f_row.get('Nombre 1', '')))
+                        n2 = limpiar_texto_para_match(str(f_row.get('Nombre 2', '')))
+                        if (id_cartola_limpio[:3] in n1) or (id_cartola_limpio[:3] in n2) or (n1[:3] in id_cartola_limpio if len(n1)>=3 else False):
+                            match_final = match_por_monto.loc[[f_idx]]
+                            criterio_encontrado = "Monto + Nombre Aprox"
+                            break
+
+        # --- PASO 3: REGISTRAR EL RESULTADO ---
+        if not match_final.empty:
+            f_row = match_final.iloc[0]
+            facturas_usadas.add(f_row['Folio'])
+            dif = monto_pago - f_row['Monto Total']
+            
+            estado = '🟢 Conciliado Exacto' if dif == 0 else '🟡 Diferencia en Monto'
+            
+            cruce_list.append({
+                'Fecha Banco': row_c['Fecha'],
+                'Identificador Cartola': id_cartola,
+                'Monto Banco ($)': monto_pago,
+                'Folio Factura': f_row['Folio'],
+                'Entidad Matcheada': f_row.get('Nombre 1', f_row.get('Nombre 2', 'N/A')),
+                'Match Por': criterio_encontrado,
+                'Monto Factura ($)': f_row['Monto Total'],
+                'Diferencia ($)': dif,
+                'Estado Conciliación': estado
+            })
         else:
             cruce_list.append({
                 'Fecha Banco': row_c['Fecha'],
@@ -699,3 +700,4 @@ if not df_cartola_global.empty or df_ventas_global is not None:
                 mime="text/csv",
                 use_container_width=True
             )
+
