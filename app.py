@@ -98,54 +98,52 @@ def limpiar_monto_celda(val):
         return 0.0
 
 # -----------------------------------------------------------------------------
-# ALGORITMO SUBSET SUM OPTIMIZADO (BRANCH AND BOUND)
+# ALGORITMO SUBSET SUM REFORZADO (BRANCH AND BOUND)
 # -----------------------------------------------------------------------------
 
-def buscar_combinacion_subconjunto(df_candidatos, monto_objetivo, col_monto='Monto_Real', max_docs=30):
+def buscar_combinacion_subconjunto(df_candidatos, monto_objetivo, col_monto='Monto_Real', max_docs=40):
     """
     Busca de manera ultra rápida un grupo de facturas que sumen exactamente el monto del banco.
     """
     if df_candidatos.empty or monto_objetivo <= 0:
         return []
 
-    # 1. Poda inicial: Eliminar facturas con monto mayor al abono del banco (+1 de margen por redondeo)
-    candidatos_df = df_candidatos[df_candidatos[col_monto] <= (monto_objetivo + 1.0)].copy()
+    # Se consideran candidatas facturas que no superen por sí solas el abono (+10 para tolerancia de redondeos)
+    candidatos_df = df_candidatos[df_candidatos[col_monto] <= (monto_objetivo + 10.0)].copy()
     if candidatos_df.empty:
         return []
 
-    # 2. Ordenar de mayor a menor para acelerar los descartes tempranos
+    # Ordenar de mayor a menor para podar ramas rápidamente
     candidatos_df = candidatos_df.sort_values(by=col_monto, ascending=False)
-    
-    # Extraer pares (Índice Original, Monto)
     items = list(zip(candidatos_df.index, candidatos_df[col_monto]))
     
     resultado_indices = []
 
     def backtrack(index, suma_actual, combo_actual):
         nonlocal resultado_indices
-        if resultado_indices:  # Si ya se encontró coincidencia exacta, salir
+        if resultado_indices:
             return
 
-        # Tolerancia para pequeñas diferencias o redondeos (< $1)
-        if abs(suma_actual - monto_objetivo) < 1.0:
+        # Tolerancia estricta de $2 para diferencias menores/redondeos
+        if abs(suma_actual - monto_objetivo) <= 2.0:
             resultado_indices = list(combo_actual)
             return
 
-        if suma_actual > (monto_objetivo + 1.0) or index >= len(items) or len(combo_actual) >= max_docs:
+        if suma_actual > (monto_objetivo + 2.0) or index >= len(items) or len(combo_actual) >= max_docs:
             return
 
-        # Poda de corte: Si la suma acumulada + todo lo que queda disponible no alcanza el objetivo
+        # Poda: Si lo que queda no alcanza para el objetivo
         suma_restante = sum(m for _, m in items[index:])
-        if (suma_actual + suma_restante) < (monto_objetivo - 1.0):
+        if (suma_actual + suma_restante) < (monto_objetivo - 2.0):
             return
 
-        # Opción 1: Incluir la factura actual
+        # Incluir elemento
         idx_orig, monto = items[index]
         combo_actual.append(idx_orig)
         backtrack(index + 1, suma_actual + monto, combo_actual)
-        combo_actual.pop()  # Backtrack
+        combo_actual.pop()
 
-        # Opción 2: Omitir la factura actual
+        # Omitir elemento
         backtrack(index + 1, suma_actual, combo_actual)
 
     backtrack(0, 0.0, [])
@@ -178,7 +176,6 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
     df_ventas_prep['Fila_Texto_Norm'] = df_ventas_prep['Fila_Texto'].apply(expandir_y_limpiar_texto)
     df_ventas_prep['RUT_Norm'] = df_ventas_prep['Fila_Texto'].apply(extraer_rut)
     
-    # EXTRAER MONTO REAL DIRECTO DE LA COLUMNA
     if col_monto_v:
         df_ventas_prep['Monto_Real'] = df_ventas_prep[col_monto_v].apply(limpiar_monto_celda)
     else:
@@ -200,39 +197,32 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
         ventas_disponibles = df_ventas_prep[~df_ventas_prep.index.isin(indices_ventas_usados)]
 
         # =====================================================================
-        # ESTRATEGIA 0: BÚSQUEDA AGRUPADA POR RUT (FORZAR SUMA EXACTA DEL BANCO)
+        # ESTRATEGIA 0: BÚSQUEDA OBLIGATORIA DE SUMA EXACTA POR RUT (1 a N)
         # =====================================================================
         if rut_c and monto_banco > 0:
             cand_rut = ventas_disponibles[ventas_disponibles['RUT_Norm'] == rut_c]
             
             if not cand_rut.empty:
-                # 1. Intentar si hay 1 sola factura con el monto exacto
-                coincidencia_exacta_1a1 = cand_rut[abs(cand_rut['Monto_Real'] - monto_banco) < 1.0]
-                if not coincidencia_exacta_1a1.empty:
-                    match_indices = [coincidencia_exacta_1a1.index[0]]
-                    tipo_match = "RUT 1 (Exacto 1:1)"
+                # 1. ¿Existe 1 sola factura por el monto exacto?
+                exacto_1a1 = cand_rut[abs(cand_rut['Monto_Real'] - monto_banco) <= 2.0]
+                if not exacto_1a1.empty:
+                    match_indices = [exacto_1a1.index[0]]
+                    tipo_match = "RUT Exacto (1:1)"
                 else:
-                    # 2. BÚSQUEDA SUBSET SUM: Exigir combinación de facturas que SUME EXACTO el banco
-                    combo_encontrada = buscar_combinacion_subconjunto(cand_rut, monto_banco, col_monto='Monto_Real')
-                    if combo_encontrada:
-                        match_indices = combo_encontrada
-                        tipo_match = f"RUT 1 (Pago Agrupado 1:{len(combo_encontrada)})"
+                    # 2. ¿La suma de TODAS las facturas de este RUT da exacto el abono?
+                    suma_total_rut = cand_rut['Monto_Real'].sum()
+                    if abs(suma_total_rut - monto_banco) <= 2.0:
+                        match_indices = cand_rut.index.tolist()
+                        tipo_match = f"RUT Todas las Facturas (1:{len(match_indices)})"
+                    else:
+                        # 3. Buscar subconjunto exacto mediante Branch & Bound
+                        combo = buscar_combinacion_subconjunto(cand_rut, monto_banco, col_monto='Monto_Real')
+                        if combo:
+                            match_indices = combo
+                            tipo_match = f"RUT Pago Agrupado (1:{len(combo)})"
 
         # =====================================================================
-        # ESTRATEGIA 1: TEXTO FLEX + MONTO EXACTO (1 a 1)
-        # =====================================================================
-        if not match_indices and monto_banco > 0:
-            for idx_v, row_v in ventas_disponibles.iterrows():
-                similitud_texto = calcular_similitud_textual(texto_c_norm, row_v['Fila_Texto_Norm'])
-                coincide_monto = abs(monto_banco - row_v['Monto_Real']) < 1.0
-
-                if similitud_texto >= 0.50 and coincide_monto:
-                    match_indices = [idx_v]
-                    tipo_match = "Nombre 1 (Flex) (Exacto 1:1)"
-                    break
-
-        # =====================================================================
-        # ESTRATEGIA 2: SUMA AGRUPADA POR NOMBRE (1 a N CON SUBSET SUM)
+        # ESTRATEGIA 1: SUMA AGRUPADA POR NOMBRE DE CLIENTE (SI NO HAY RUT O FALLÓ)
         # =====================================================================
         if not match_indices and monto_banco > 0:
             indices_cand_nombre = []
@@ -241,29 +231,29 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
                 if similitud >= 0.45:
                     indices_cand_nombre.append(idx_v)
 
-            if len(indices_cand_nombre) >= 2:
+            if indices_cand_nombre:
                 cand_nombre = ventas_disponibles.loc[indices_cand_nombre]
-                combo_encontrada = buscar_combinacion_subconjunto(cand_nombre, monto_banco, col_monto='Monto_Real')
-                if combo_encontrada:
-                    match_indices = combo_encontrada
-                    tipo_match = f"Agrupado (1 a {len(combo_encontrada)}): Suma Facturas Cuadrada"
+                
+                # 1. Evaluar si 1 sola factura coincide exactamente
+                exacto_nom = cand_nombre[abs(cand_nombre['Monto_Real'] - monto_banco) <= 2.0]
+                if not exacto_nom.empty:
+                    match_indices = [exacto_nom.index[0]]
+                    tipo_match = "Nombre Exacto (1:1)"
+                else:
+                    # 2. Buscar combinación que sume exacto
+                    combo_nom = buscar_combinacion_subconjunto(cand_nombre, monto_banco, col_monto='Monto_Real')
+                    if combo_nom:
+                        match_indices = combo_nom
+                        tipo_match = f"Nombre Agrupado (1:{len(combo_nom)})"
 
         # =====================================================================
-        # ESTRATEGIA 3: FALLBACK FLEX POR MONTO EXACTO ÚNICO
+        # ESTRATEGIA 2: FALLBACK ÚLTIMO RECURSO POR MONTO EXACTO (SÓLO SI ES IDÉNTICO)
         # =====================================================================
         if not match_indices and monto_banco > 0:
-            candidatos_monto = []
-            for idx_v, row_v in ventas_disponibles.iterrows():
-                if abs(monto_banco - row_v['Monto_Real']) < 1.0:
-                    similitud = calcular_similitud_textual(texto_c_norm, row_v['Fila_Texto_Norm'])
-                    candidatos_monto.append((idx_v, similitud))
-
-            if candidatos_monto:
-                candidatos_monto.sort(key=lambda x: x[1], reverse=True)
-                best_idx, best_sim = candidatos_monto[0]
-                if best_sim >= 0.20 or len(candidatos_monto) == 1:
-                    match_indices = [best_idx]
-                    tipo_match = f"Monto Exacto Flex (Similitud: {int(best_sim*100)}%)"
+            cand_monto_unico = ventas_disponibles[abs(ventas_disponibles['Monto_Real'] - monto_banco) <= 2.0]
+            if len(cand_monto_unico) == 1:
+                match_indices = [cand_monto_unico.index[0]]
+                tipo_match = "Monto Unico Coincidente"
 
         # =====================================================================
         # REGISTRO DE RESULTADOS
@@ -288,7 +278,7 @@ def conciliar_informacion_flexible(df_cartola, df_ventas):
                 'Tipo Coincidencia': tipo_match,
                 'Monto Ventas ($)': monto_factura_total,
                 'Diferencia ($)': dif,
-                'Estado Conciliación': '🟢 Conciliado Exacto' if abs(dif) < 1.0 else '🟡 Diferencia en Monto'
+                'Estado Conciliación': '🟢 Conciliado Exacto' if abs(dif) <= 2.0 else '🟡 Diferencia en Monto'
             })
         else:
             cruce_list.append({
