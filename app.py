@@ -52,23 +52,19 @@ def encontrar_columna(columnas, palabras_clave):
     return None
 
 # -----------------------------------------------------------------------------
-# ALGORITMO FUERZA BRUTA (CON TOLERANCIA)
+# ALGORITMO FUERZA BRUTA (CON TOLERANCIA DE $2)
 # -----------------------------------------------------------------------------
 def buscar_combinacion_robusta(df_candidatos, monto_objetivo, col_monto='Monto_Real', tolerancia=2):
-    """Prueba TODAS las combinaciones posibles si hay <= 18 facturas. Inmune a errores de orden."""
     if df_candidatos.empty or monto_objetivo <= 0: return []
-    
     cand = df_candidatos[df_candidatos[col_monto] <= (monto_objetivo + tolerancia)].copy()
     if cand.empty: return []
 
     items = list(cand.index)
     montos = list(cand[col_monto])
     
-    # 1. Validar suma total primero (El caso más común si pagan todo)
     if abs(sum(montos) - monto_objetivo) <= tolerancia:
         return items
 
-    # 2. Fuerza bruta absoluta (Matemáticamente infalible para grupos pequeños)
     n = len(items)
     if n <= 18:
         for r in range(1, n + 1):
@@ -76,7 +72,6 @@ def buscar_combinacion_robusta(df_candidatos, monto_objetivo, col_monto='Monto_R
                 if abs(sum(montos[i] for i in combo_indices) - monto_objetivo) <= tolerancia:
                     return [items[i] for i in combo_indices]
     else:
-        # 3. Método codicioso (Fallback si un cliente tiene demasiadas facturas para no congelar la app)
         cand = cand.sort_values(by=col_monto, ascending=False)
         items_sort, montos_sort = list(cand.index), list(cand[col_monto])
         acumulado, combo = 0, []
@@ -89,7 +84,7 @@ def buscar_combinacion_robusta(df_candidatos, monto_objetivo, col_monto='Monto_R
     return []
 
 # -----------------------------------------------------------------------------
-# NÚCLEO DE CONCILIACIÓN (SIN CACHÉ PARA FORZAR LIMPIEZA)
+# NÚCLEO DE CONCILIACIÓN
 # -----------------------------------------------------------------------------
 def conciliar_informacion(df_cartola, df_ventas):
     if df_cartola.empty or df_ventas is None or df_ventas.empty:
@@ -119,33 +114,26 @@ def conciliar_informacion(df_cartola, df_ventas):
 
         match_indices = []
         tipo_match = "Sin Coincidencia"
-        log_busqueda = "Inicio."
 
         ventas_disponibles = df_ventas_prep[~df_ventas_prep.index.isin(indices_ventas_usados)]
 
         if rut_c and monto_banco > 0:
             cand_rut = ventas_disponibles[ventas_disponibles['RUT_Norm'] == rut_c]
             if not cand_rut.empty:
-                log_busqueda = f"RUT encontrado con {len(cand_rut)} facturas (Suma total: {cand_rut['Monto_Real'].sum()}). "
-                
                 exacto_1a1 = cand_rut[abs(cand_rut['Monto_Real'] - monto_banco) <= 2]
                 if not exacto_1a1.empty:
                     match_indices = [exacto_1a1.index[0]]
                     tipo_match = "🟢 RUT Exacto (1:1)"
-                    log_busqueda += "Monto exacto en 1 factura."
                 else:
                     combo = buscar_combinacion_robusta(cand_rut, monto_banco, col_monto='Monto_Real')
                     if combo:
                         match_indices = combo
-                        tipo_match = f"🟢 RUT Pago Agrupado Exacto (1:{len(combo)})"
-                        log_busqueda += "Combinación exacta encontrada."
+                        tipo_match = f"🟢 RUT Pago Agrupado (1:{len(combo)})"
                     else:
-                        cand_ordenado = cand_rut.sort_values(by='Monto_Real', ascending=False)
-                        match_indices = [cand_ordenado.index[0]]
-                        tipo_match = "🔴 Diferencia Inexplicable (Asignación Forzada)"
-                        log_busqueda += "Fuerza bruta falló. No suman el abono. Se asignó la factura mayor."
+                        # Si no hay suma exacta, asigna todo para mostrar la diferencia
+                        match_indices = cand_rut.index.tolist()
+                        tipo_match = "🟡 RUT Diferencia (Sobrepago o Abono Parcial)"
 
-        # GENERACIÓN DEL REGISTRO
         if match_indices:
             for i in match_indices: indices_ventas_usados.add(i)
             rows_matched = df_ventas_prep.loc[match_indices]
@@ -163,8 +151,7 @@ def conciliar_informacion(df_cartola, df_ventas):
                 'Tipo Coincidencia': tipo_match,
                 'Monto Ventas ($)': monto_ventas_tot,
                 'Diferencia ($)': dif,
-                'Estado Conciliación': estado,
-                'Log de Búsqueda': log_busqueda
+                'Estado Conciliación': estado
             })
         else:
             cruce_list.append({
@@ -175,8 +162,7 @@ def conciliar_informacion(df_cartola, df_ventas):
                 'Tipo Coincidencia': 'Sin Coincidencia',
                 'Monto Ventas ($)': 0,
                 'Diferencia ($)': monto_banco,
-                'Estado Conciliación': '🔴 Abono No Identificado',
-                'Log de Búsqueda': 'No se detectó RUT en la fila o no existe en cartera.'
+                'Estado Conciliación': '🔴 Abono No Identificado'
             })
 
     df_cruce = pd.DataFrame(cruce_list)
@@ -191,7 +177,6 @@ def conciliar_informacion(df_cartola, df_ventas):
 # INTERFAZ STREAMLIT
 # -----------------------------------------------------------------------------
 st.title("🏦 Sistema de Conciliación Bancaria - Modo Blindado")
-st.markdown("Algoritmo de **Fuerza Bruta Matemática** con tolerancia de $2 pesos y sin caché.")
 
 col1, col2 = st.columns(2)
 with col1: file_cartola = st.file_uploader("Subir Cartola", type=["xlsx", "xls", "csv"], key="cartola")
@@ -203,7 +188,7 @@ if file_cartola and file_ventas:
         df_ventas = pd.read_csv(file_ventas) if file_ventas.name.endswith('.csv') else pd.read_excel(file_ventas)
 
         if st.button("🚀 Ejecutar Conciliación Blindada", type="primary"):
-            with st.spinner("Ejecutando fuerza bruta en combinaciones..."):
+            with st.spinner("Buscando sumas exactas..."):
                 df_cruce, df_pendientes = conciliar_informacion(df_cartola, df_ventas)
                 st.session_state['df_cruce'] = df_cruce
                 st.session_state['df_pendientes'] = df_pendientes
@@ -213,18 +198,13 @@ if file_cartola and file_ventas:
             df_pendientes = st.session_state['df_pendientes']
 
             st.divider()
-            st.subheader("📊 Resumen de Resultados")
-
+            
             m1, m2, m3 = st.columns(3)
-            tot_exactos = len(df_cruce[df_cruce['Estado Conciliación'] == '🟢 Conciliado Exacto'])
-            tot_diferencias = len(df_cruce[df_cruce['Estado Conciliación'] == '🟡 Diferencia en Monto'])
-            tot_no_encontrados = len(df_cruce[df_cruce['Estado Conciliación'] == '🔴 Abono No Identificado'])
+            m1.metric("🟢 Conciliados Exactos", len(df_cruce[df_cruce['Estado Conciliación'] == '🟢 Conciliado Exacto']))
+            m2.metric("🟡 Diferencias", len(df_cruce[df_cruce['Estado Conciliación'] == '🟡 Diferencia en Monto']))
+            m3.metric("🔴 No Identificados", len(df_cruce[df_cruce['Estado Conciliación'] == '🔴 Abono No Identificado']))
 
-            m1.metric("🟢 Conciliados Exactos", tot_exactos)
-            m2.metric("🟡 Diferencias", tot_diferencias)
-            m3.metric("🔴 No Identificados", tot_no_encontrados)
-
-            st.subheader("📋 Matriz de Cruce de Cartola")
+            st.subheader("📋 Matriz de Cruce")
             st.dataframe(df_cruce, use_container_width=True)
 
             output = io.BytesIO()
