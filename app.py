@@ -29,7 +29,8 @@ def extraer_rut(texto):
     """Extrae RUT normalizado (solo números y K) eliminando puntos, guiones y ceros iniciales."""
     if not isinstance(texto, str) or pd.isna(texto):
         return ""
-    match = re.search(r'\b(\d{1,2}\.?\d{3}\.?\d{3}-?[\dkK])\b', str(texto))
+    # Permite ceros iniciales opcionales
+    match = re.search(r'\b(0*\d{1,3}\.?\d{3}\.?\d{3}-?[\dkK])\b', str(texto))
     if match:
         rut_limpio = re.sub(r'[^0-9K]', '', match.group(1).upper())
         return rut_limpio.lstrip('0')
@@ -68,6 +69,15 @@ def limpiar_monto_entero(val, solo_positivos=True):
         return abs(res) if solo_positivos else res
     except ValueError:
         return 0
+
+def encontrar_columna(columnas, palabras_clave):
+    """Busca un nombre de columna que contenga alguna de las palabras clave."""
+    cols_limpias = {col: str(col).strip().upper() for col in columnas}
+    for palabra in palabras_clave:
+        for col_orig, col_limpia in cols_limpias.items():
+            if palabra in col_limpia:
+                return col_orig
+    return None
 
 # -----------------------------------------------------------------------------
 # ALGORITMO SUBSET SUM OPTIMIZADO (O(1) SUFFIX LOOKUP)
@@ -135,17 +145,23 @@ def conciliar_informacion(df_cartola, df_ventas):
     indices_ventas_usados = set()
     df_ventas_prep = df_ventas.copy()
     
-    # Identificación automática de columnas
-    col_monto_v = next((c for c in ['Monto tot', 'Monto Total', 'Monto', 'Total', 'Saldo', 'VALOR'] if c in df_ventas_prep.columns), None)
-    col_folio_v = next((c for c in ['Documento', 'Folio', 'N° Factura', 'Numero', 'Factura', 'ID', 'FOLIO'] if c in df_ventas_prep.columns), None)
-    col_cliente_v = next((c for c in ['Deudor', 'Nombre 2', 'Nombre Cliente', 'Cliente', 'Razon Social', 'NOMBRE'] if c in df_ventas_prep.columns), df_ventas_prep.columns[0])
-    col_monto_c = next((c for c in ['Abono', 'Monto', 'Crédito', 'Credito', 'Deposito', 'DEPOSITO'] if c in df_cartola.columns), None)
+    # Identificación automática de columnas robusta
+    col_cliente_v = encontrar_columna(df_ventas_prep.columns, ['DEUDOR', 'CLIENTE', 'RAZON']) or df_ventas_prep.columns[0]
+    col_rut_v = encontrar_columna(df_ventas_prep.columns, ['RUT'])
+    col_monto_v = encontrar_columna(df_ventas_prep.columns, ['ADEUDADO', 'MONTO TOT', 'MONTO', 'SALDO'])
+    col_folio_v = encontrar_columna(df_ventas_prep.columns, ['DOC', 'FOLIO', 'FACTURA', 'NUMERO'])
+    
+    col_monto_c = encontrar_columna(df_cartola.columns, ['ABONO', 'DEPOSITO', 'CREDITO', 'MONTO'])
 
     # Preprocesar textos, RUTs y montos en cartera
     df_ventas_prep['Fila_Texto'] = df_ventas_prep.apply(lambda r: " ".join([str(v) for v in r.values if pd.notna(v)]), axis=1)
     df_ventas_prep['Fila_Texto_Norm'] = df_ventas_prep['Fila_Texto'].apply(expandir_y_limpiar_texto)
     df_ventas_prep['Cliente_Norm'] = df_ventas_prep[col_cliente_v].apply(expandir_y_limpiar_texto)
-    df_ventas_prep['RUT_Norm'] = df_ventas_prep['Fila_Texto'].apply(extraer_rut)
+    
+    if col_rut_v:
+        df_ventas_prep['RUT_Norm'] = df_ventas_prep[col_rut_v].apply(extraer_rut)
+    else:
+        df_ventas_prep['RUT_Norm'] = df_ventas_prep['Fila_Texto'].apply(extraer_rut)
     
     if col_monto_v:
         df_ventas_prep['Monto_Real'] = df_ventas_prep[col_monto_v].apply(limpiar_monto_entero)
@@ -262,6 +278,10 @@ def conciliar_informacion(df_cartola, df_ventas):
 
     df_cruce = pd.DataFrame(cruce_list)
     ventas_pendientes = df_ventas_prep[~df_ventas_prep.index.isin(indices_ventas_usados)].copy()
+    
+    # Limpiar las columnas extra de normalización antes de exportar pendientes
+    cols_a_eliminar = ['Fila_Texto', 'Fila_Texto_Norm', 'Cliente_Norm', 'RUT_Norm', 'Monto_Real']
+    ventas_pendientes = ventas_pendientes.drop(columns=[c for c in cols_a_eliminar if c in ventas_pendientes.columns])
     
     return df_cruce, ventas_pendientes
 
