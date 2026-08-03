@@ -206,7 +206,7 @@ for idx_c, row_c in df_cartola.iterrows():
         
         folios = ", ".join([str(r[col_folio_v]) if col_folio_v else f"FILA-{i+1}" for i, r in rows_matched.iterrows()])
         entidad = rows_matched.iloc[0][col_cliente_v]
-        monto_factura_total = sum([r['Fila_Montos'][0] for _, r in rows_matched.iterrows() if r['Fila_Montos']])
+        obtener_monto_principal(df_ventas_prep.loc[i, 'Fila_Montos']) for _, r in rows_matched.iterrows() if r['Fila_Montos']])
         
         dif = monto_banco - monto_factura_total
 
