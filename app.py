@@ -63,14 +63,11 @@ if file_cartola and file_ventas:
             for alerta in alertas_duplicados:
                 st.warning(alerta)
 
-        # Vistas previas
-        tab1, tab2 = st.tabs(["📄 Cartola Adaptada", "📄 Cartera Adaptada"])
-        with tab1:
-            st.dataframe(df_cartola.head(5), use_container_width=True)
-        with tab2:
-            st.dataframe(df_ventas.head(5), use_container_width=True)
-
-        st.divider()
+        # Vistas previas optimizadas: solo cartola completa para verificación y ahorro de memoria
+        st.subheader("📄 Cartola Bancaria Procesada")
+        st.dataframe(df_cartola, use_container_width=True) # Muestra toda la cartola sin cortes
+        
+        st.info("💡 Cartera de ventas cargada exitosamente en memoria y lista para el cruce masivo (sin previsualización pesada para mantener la app rápida).")
 
         # Botón para ejecutar el núcleo de conciliación (Fase 3)
         if st.button("🚀 Ejecutar Conciliación Inteligente", type="primary"):
