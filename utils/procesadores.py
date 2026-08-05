@@ -1,56 +1,55 @@
 import pandas as pd
-import io
+import pdfplumber
 
-def leer_archivo_subido(archivo_subido):
-    """Lee archivos Excel, CSV o PDF y los transforma de manera uniforme en una tabla de Pandas."""
-    if archivo_subido is None:
-        return None
-        
-    nombre_archivo = archivo_subido.name.lower()
+def leer_archivo_subido(archivo):
+    """Lee archivos Excel, CSV o PDF de manera universal, asegurando extraer todas las filas."""
+    nombre = archivo.name.lower()
     
-    try:
-        if nombre_archivo.endswith('.csv'):
-            # Intenta leer CSV con separadores comunes (coma o punto y coma)
-            try:
-                return pd.read_csv(archivo_subido, encoding='utf-8')
-            except:
-                archivo_subido.seek(0)
-                return pd.read_csv(archivo_subido, encoding='latin1', sep=';')
-                
-        elif nombre_archivo.endswith(('.xls', '.xlsx')):
-            return pd.read_excel(archivo_subido)
+    if nombre.endswith(('.xlsx', '.xls')):
+        return pd.read_excel(archivo, sheet_name=0)
+    
+    elif nombre.endswith('.csv'):
+        try:
+            return pd.read_csv(archivo, sep=';', encoding='utf-8')
+        except:
+            return pd.read_csv(archivo, sep=',', encoding='utf-8')
             
-        elif nombre_archivo.endswith('.pdf'):
-            # Bloque especial para procesar PDFs (cartolas bancarias)
-            # Nota: Usaremos pdfplumber más adelante de manera segura
-            import pdfplumber
-            
-            datos_filas = []
-            with pdfplumber.open(archivo_subido) as pdf:
-                for pagina in pdf.pages:
-                    tabla = pagina.extract_table()
-                    if tabla:
-                        datos_filas.extend(tabla)
-                    else:
-                        # Si no hay tabla estructurada, extraemos líneas de texto sueltas
-                        texto = pagina.extract_text()
-                        if texto:
-                            for linea in texto.split('\n'):
-                                datos_filas.append([linea])
-                                
-            if datos_filas:
-                # Convertimos las líneas extraídas del PDF en una tabla básica
-                df = pd.DataFrame(datos_filas)
-                if len(df.columns) > 1:
-                    df.columns = [f"Col_{i}" for i in range(len(df.columns))]
+    elif nombre.endswith('.pdf'):
+        filas_pdf = []
+        with pdfplumber.open(archivo) as pdf:
+            for num_pag, pagina in enumerate(pdf.pages):
+                # Intentamos extraer tabla estructurada por página
+                tabla = pagina.extract_table()
+                if tabla:
+                    filas_pdf.extend(tabla)
                 else:
-                    df.columns = ["Texto_PDF"]
-                return df
-            else:
-                raise ValueError("No se pudo extraer texto legible del PDF.")
-                
-        else:
-            raise ValueError("Formato de archivo no soportado.")
+                    # Si la página no tiene formato de tabla estricta, extraemos texto línea por línea
+                    texto = pagina.extract_text()
+                    if texto:
+                        for linea in texto.split('\n'):
+                            # Filtramos líneas basura típicas de encabezados de correo o pies de página
+                            linea_upper = linea.upper()
+                            if not any(excl in linea_upper for `in` ['PAGINA', 'DE:', 'ENVIADO EL:', 'ESTIMADOS']):
+                                filas_pdf.append([linea])
+                                
+        if filas_pdf:
+            # Buscamos la fila que contenga los títulos reales en todo el PDF extraído
+            idx_encabezado = 0
+            for idx, row in enumerate(filas_pdf[:15]):
+                row_str = " ".join([str(v).upper() for v in row if v])
+                if 'FECHA' in row_str and ('ABONO' in row_str or 'DESCRIPCION' in row_str or 'GLOSA' in row_str):
+                    idx_encabezado = idx
+                    break
             
-    except Exception as e:
-        raise Exception(f"Error al leer el archivo {archivo_subido.name}: {str(e)}")
+            headers = filas_pdf[idx_encabezado] if idx_encabezado < len(filas_pdf) else [f"Col_{i}" for i in range(len(filas_pdf[0]))]
+            data = filas_pdf[idx_encabezado + 1:]
+            
+            # Limpiamos filas que tengan celdas vacías o sean nulas
+            data_limpia = [row for row in data if any(val not in [None, ""] for val in row)]
+            
+            return pd.DataFrame(data_limpia, columns=headers[:len(data_limpia[0])] if data_limpia else None)
+        else:
+            raise ValueError("No se pudo extraer contenido legible del PDF.")
+            
+    else:
+        raise ValueError("Formato de archivo no compatible.")
