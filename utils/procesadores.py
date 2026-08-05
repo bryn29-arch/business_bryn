@@ -2,12 +2,15 @@ import pandas as pd
 import pdfplumber
 
 def leer_archivo_subido(archivo):
-    """Lector universal y directo para Excel, CSV y PDFs bancarios (sin recortar filas)."""
+    """Lector ultra seguro para evitar bucles y errores de lectura."""
+    if archivo is None:
+        return None
+        
     nombre = archivo.name.lower()
     
     if nombre.endswith(('.xlsx', '.xls')):
         return pd.read_excel(archivo, sheet_name=0)
-    
+        
     elif nombre.endswith('.csv'):
         try:
             return pd.read_csv(archivo, sep=';', encoding='utf-8')
@@ -15,28 +18,19 @@ def leer_archivo_subido(archivo):
             return pd.read_csv(archivo, sep=',', encoding='utf-8')
             
     elif nombre.endswith('.pdf'):
-        filas_pdf = []
+        # Extracción segura línea por línea para evitar bloqueos
+        lineas = []
         with pdfplumber.open(archivo) as pdf:
             for pagina in pdf.pages:
-                # Extraemos tablas si las hay
-                tabla = pagina.extract_table()
-                if tabla:
-                    filas_pdf.extend(tabla)
-                else:
-                    # Si no hay tabla estructurada, extraemos cada línea de texto visible
-                    texto = pagina.extract_text()
-                    if texto:
-                        for linea in texto.split('\n'):
-                            filas_pdf.append([linea])
-                            
-        if filas_pdf:
-            # Convertimos directamente en DataFrame usando la primera línea como columnas
-            df = pd.DataFrame(filas_pdf[1:], columns=filas_pdf[0])
-            # Limpiamos filas vacías
-            df = df.dropna(how='all').reset_index(drop=True)
-            return df
+                texto = pagina.extract_text()
+                if texto:
+                    for linea in texto.split('\n'):
+                        lineas.append([linea])
+                        
+        if lineas:
+            return pd.DataFrame(lineas, columns=["Texto_Cartola"])
         else:
-            raise ValueError("No se pudo extraer texto del PDF.")
+            raise ValueError("El PDF está vacío o no contiene texto legible.")
             
     else:
-        raise ValueError("Formato de archivo no soportado.")
+        raise ValueError("Formato no soportado.")
