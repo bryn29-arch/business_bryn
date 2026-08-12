@@ -7,21 +7,21 @@ from utils.conciliacion import conciliar_cartera_y_cartola
 st.set_page_config(page_title="Conciliación Bancaria Inteligente", page_icon="🏦", layout="wide")
 
 st.title("🏦 Sistema de Conciliación Bancaria y Factoring")
-st.markdown("Herramienta automatizada con selección manual de columnas para la cartera.")
+st.markdown("Herramienta automatizada con selección manual de columnas y conteo rápido de documentos.")
 
 # 1. Zona de Carga de Archivos
 col1, col2 = st.columns(2)
 with col1:
     file_cartola = st.file_uploader("1️⃣ Cartola Bancaria (PDF o Excel)", type=["xlsx", "xls", "csv", "pdf"], key="cartola")
 with col2:
-    file_ventas = st.file_uploader("2️⃣ Cartera de Ventas / Factoring (Excel / CSV)", type=["xlsx", "xls", "csv"], key="ventas")
+    file_ventas = st.file_uploader("2️⃣ Cartera de Documentos / Ventas (Excel / CSV)", type=["xlsx", "xls", "csv"], key="ventas")
 
 if file_cartola and file_ventas:
     try:
         # Leemos la cartola (queda intacta)
         df_cartola = leer_archivo_subido(file_cartola)
         
-        # Leemos la cartera de ventas en bruto para extraer sus encabezados
+        # Leemos la cartera de documentos en bruto para extraer sus encabezados y métricas
         nombre_v = file_ventas.name.lower()
         if nombre_v.endswith('.csv'):
             try:
@@ -33,9 +33,14 @@ if file_cartola and file_ventas:
 
         st.success("✨ ¡Archivos cargados con éxito!")
 
-        # 2. PANEL DE SELECCIÓN MANUAL DE COLUMNAS PARA LA CARTERA
-        st.subheader("⚙️ Seleccion de Columnas")
-        st.markdown("Elegir Columnas para conciliar:")
+        # 2. INDICADOR RÁPIDO DE DOCUMENTOS (Sin vista previa pesada)
+        total_documentos = len(df_ventas_raw)
+        
+        st.info(f"📊 Archivo de documentos cargado correctamente. Se detectaron **{total_documentos:,}** registros y **{len(df_ventas_raw.columns)}** columnas.".replace(",", "."))
+
+        # 3. PANEL DE SELECCIÓN MANUAL DE COLUMNAS PARA LOS DOCUMENTOS
+        st.subheader("⚙️ Mapeo Manual de Columnas del Archivo de Documentos")
+        st.markdown("Indica qué columna de tu archivo corresponde a cada campo para asegurar un match perfecto:")
         
         columnas_disponibles = list(df_ventas_raw.columns)
 
@@ -67,17 +72,9 @@ if file_cartola and file_ventas:
 
         st.divider()
 
-        # 3. Vista previa de los datos
-        with st.expander("👁️ Ver Vista Previa de Datos Procesados"):
-            tab1, tab2 = st.tabs(["Cartola Bancaria", "Cartera de Ventas Configurada"])
-            with tab1:
-                st.dataframe(df_cartola, use_container_width=True)
-            with tab2:
-                st.dataframe(df_ventas, use_container_width=True)
-
         # 4. Botón para ejecutar el motor de emparejamiento inteligente
         if st.button("🚀 Ejecutar Conciliación Inteligente", type="primary"):
-            with st.spinner("Cruzando cartola con la cartera de ventas configurada..."):
+            with st.spinner("Cruzando cartola con los documentos configurados..."):
                 df_cruce, df_pendientes = conciliar_cartera_y_cartola(df_cartola, df_ventas)
                 st.session_state['df_cruce'] = df_cruce
                 st.session_state['df_pendientes'] = df_pendientes
@@ -113,4 +110,4 @@ if file_cartola and file_ventas:
     except Exception as e:
         st.error(f"Ocurrió un error al procesar la información: {str(e)}")
 else:
-    st.info("👈 Sube tu cartola bancaria y tu cartera de ventas para habilitar la selección manual de columnas.")
+    st.info("👈 Sube tu cartola bancaria y tu archivo de documentos para habilitar la selección manual de columnas.")
