@@ -16,7 +16,6 @@ with col2:
 
 if file_cartola and file_ventas:
     try:
-        # Lectura directa utilizando el procesador modular
         df_cartola = leer_archivo_subido(file_cartola)
         df_ventas = leer_archivo_subido(file_ventas)
 
