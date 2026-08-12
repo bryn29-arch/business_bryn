@@ -16,13 +16,13 @@ with col2:
 
 if file_cartola and file_ventas:
     try:
-        # Lectura directa sin bucles ni recargas infinitas en el estado
+        # Lectura directa utilizando el procesador modular
         df_cartola = leer_archivo_subido(file_cartola)
         df_ventas = leer_archivo_subido(file_ventas)
 
         st.success("✨ ¡Archivos leídos correctamente!")
 
-        st.subheader("📄 Vista Previa de la Cartola")
+        st.subheader("📄 Vista Previa de la Cartola Limpia")
         st.dataframe(df_cartola, use_container_width=True)
 
         if st.button("🚀 Ejecutar Conciliación Inteligente", type="primary"):
