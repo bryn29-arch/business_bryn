@@ -1,11 +1,10 @@
 import pandas as pd
 import pdfplumber
-import re
 
 def leer_archivo_subido(archivo):
     """
     Lector universal para Excel, CSV y PDF bancario.
-    Elimina toda la basura inicial, detecta la línea de encabezados y divide los campos en columnas.
+    Elimina la cabecera, detecta los encabezados, separa columnas y corta los pies de página de la cartola.
     """
     if archivo is None:
         return None
@@ -34,35 +33,50 @@ def leer_archivo_subido(archivo):
                         if linea_limpia:
                             lineas_crudas.append(linea_limpia)
                             
-        # 2. Encontrar dónde comienzan realmente los datos (buscando la línea de encabezados o la primera fecha con transacción)
+        # 2. Encontrar dónde comienzan realmente los datos
         idx_inicio = 0
         for i, linea in enumerate(lineas_crudas):
             linea_upper = linea.upper()
-            # Identificamos la fila donde aparecen los títulos de la tabla o el primer movimiento con fecha y monto
             if ('FECHA' in linea_upper and 'ABONO' in linea_upper) or ('/' in linea and ('TRASPASO' in linea_upper or 'PAGO' in linea_upper or 'DEPOSITO' in linea_upper)):
-                # Si pilló la línea de encabezados exactos, empezamos justo después; si pilló el primer movimiento, empezamos ahí
                 idx_inicio = i if '/' in linea else i + 1
                 break
                 
-        # Cortamos la lista para descartar absolutamente toda la basura de arriba
         lineas_utiles = lineas_crudas[idx_inicio:]
         
-        # 3. Estructurar las líneas en columnas limpias
+        # 3. Estructurar las líneas en columnas limpias filtrando basura inicial y pies de página finales
         filas_procesadas = []
         for linea in lineas_utiles:
-            # Omitir pies de página o líneas de cierre no transaccionales
-            if any(palabra in linea.upper() for palabra in ['ATENTAMENTE', 'ESTIMADOS', 'PAGINA', 'CORREO']):
+            linea_upper = linea.upper()
+            
+            # Palabras clave comunes que indican pie de página, legales o cierre de hoja bancaria
+            palabras_pie = [
+                'ATENTAMENTE', 'ESTIMADOS', 'PAGINA', 'CORREO', 
+                'BANCO', 'CASA MATRIZ', 'ATENCION', 'TELEFONO', 
+                'DOCUMENTO ELECTRONICO', 'FIRMA', 'DIRECCION'
+            ]
+            
+            # Si detectamos una línea típica de pie de página al final, dejamos de agregar filas
+            if any(palabra in linea_upper for palabra in palabras_pie) and len(linea) > 25:
+                # Si ya llevamos bastantes transacciones, es muy probable que estemos en el pie de página final
+                if len(filas_procesadas) > 2:
+                    break
                 continue
                 
-            # Intentamos separar la fecha (primeros 10 caracteres si tienen formato DD/MM/YYYY)
+            # Omitir líneas aisladas muy cortas o irrelevantes
+            if any(basura in linea_upper for basura in ['ATENTAMENTE', 'ESTIMADOS', 'PAGINA']):
+                continue
+                
+            # Intentar separar la fecha (formato DD/MM/YYYY)
             if len(linea) > 10 and linea[2] == '/' and linea[5] == '/':
                 fecha = linea[:10]
                 resto = linea[10:].strip()
                 filas_procesadas.append([fecha, resto])
             else:
-                # Si es una línea de continuación o texto suelto
+                # Si es una línea de continuación de la descripción anterior
                 if filas_procesadas:
-                    filas_procesadas[-1][1] += " " + linea
+                    # Nos aseguramos de no anexar texto que parezca pie de página institucional
+                    if not any(p in linea_upper for p in ['LTDA', 'S.A.', 'SPA', 'BANCO']):
+                        filas_procesadas[-1][1] += " " + linea
                     
         if filas_procesadas:
             df = pd.DataFrame(filas_procesadas, columns=["FECHA", "DESCRIPCION_Y_MONTO"])
