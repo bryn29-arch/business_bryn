@@ -35,7 +35,7 @@ if file_cartola and file_ventas:
 
         # 2. PANEL DE SELECCIÓN MANUAL DE COLUMNAS PARA LA CARTERA
         st.subheader("⚙️ Mapeo Manual de Columnas de la Planilla de Cartera")
-        st.markdown("Indica qué columna de tu archivo Excel corresponde a cada campo para asegurar un match perfecto:")
+        st.markdown("Elegir Columnas para conciliar:")
         
         columnas_disponibles = list(df_ventas_raw.columns)
 
