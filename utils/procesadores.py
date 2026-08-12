@@ -3,8 +3,9 @@ import pdfplumber
 
 def leer_archivo_subido(archivo):
     """
-    Lector universal para Excel, CSV y PDF bancario.
-    Elimina la cabecera, detecta los encabezados, separa columnas y corta los pies de página de la cartola.
+    Lector universal para Excel, CSV y PDF bancario multihola.
+    Procesa todas las páginas de forma continua, descarta encabezados repetidos y pies de página,
+    y estructura las transacciones en columnas limpias.
     """
     if archivo is None:
         return None
@@ -23,9 +24,9 @@ def leer_archivo_subido(archivo):
     elif nombre.endswith('.pdf'):
         lineas_crudas = []
         
-        # 1. Extraer todo el texto de todas las páginas del PDF
+        # 1. Extraer texto de TODAS las páginas del PDF de manera secuencial
         with pdfplumber.open(archivo) as pdf:
-            for pagina in pdf.pages:
+            for num_pag, pagina in enumerate(pdf.pages):
                 texto = pagina.extract_text()
                 if texto:
                     for linea in texto.split('\n'):
@@ -33,56 +34,50 @@ def leer_archivo_subido(archivo):
                         if linea_limpia:
                             lineas_crudas.append(linea_limpia)
                             
-        # 2. Encontrar dónde comienzan realmente los datos
-        idx_inicio = 0
-        for i, linea in enumerate(lineas_crudas):
-            linea_upper = linea.upper()
-            if ('FECHA' in linea_upper and 'ABONO' in linea_upper) or ('/' in linea and ('TRASPASO' in linea_upper or 'PAGO' in linea_upper or 'DEPOSITO' in linea_upper)):
-                idx_inicio = i if '/' in linea else i + 1
-                break
-                
-        lineas_utiles = lineas_crudas[idx_inicio:]
+        # 2. Filtrar líneas basura globales (cabeceras de correo iniciales) pero conservar todo el contenido transaccional
+        lineas_utiles = []
+        comenzar_captura = False
         
-        # 3. Estructurar las líneas en columnas limpias filtrando basura inicial y pies de página finales
+        for linea in lineas_crudas:
+            linea_upper = linea.upper()
+            
+            # Detectar el inicio real de la primera transacción (ej: fecha DD/MM/YYYY)
+            if not comenzar_captura:
+                if ('/' in linea and len(linea) >= 10 and linea[2] == '/' and linea[5] == '/') and any(kw in linea_upper for kw in ['TRASPASO', 'PAGO', 'DEPOSITO', 'ABONO', 'TRANSFERENCIA']):
+                    comenzar_captura = True
+            
+            if comenzar_captura:
+                # Palabras exactas o frases típicas de pies de página o metadatos repetidos que SÍ debemos ignorar
+                es_pie_o_basura = any(basura in linea_upper for basura in [
+                    'ATENTAMENTE', 'ESTIMADOS', 'CORREO:', 'ASUNTO:', 'CC:', 'PARA:', 
+                    'DOCUMENTO ELECTRONICO', 'CASA MATRIZ', 'ATENCION CLIENTES'
+                ])
+                
+                # Omitir líneas de numeración de página aisladas (ej: "Página 1 de 2" o solo números sueltos de pie de página)
+                if linea_upper.startswith('PAGINA') or (linea.isdigit() and len(linea) <= 2):
+                    continue
+                    
+                if not es_pie_o_basura and len(linea) > 2:
+                    lineas_utiles.append(linea)
+                    
+        # 3. Estructurar las líneas útiles en columnas limpias (Fecha y Detalle/Monto)
         filas_procesadas = []
         for linea in lineas_utiles:
-            linea_upper = linea.upper()
-            
-            # Palabras clave comunes que indican pie de página, legales o cierre de hoja bancaria
-            palabras_pie = [
-                'ATENTAMENTE', 'ESTIMADOS', 'PAGINA', 'CORREO', 
-                'BANCO', 'CASA MATRIZ', 'ATENCION', 'TELEFONO', 
-                'DOCUMENTO ELECTRONICO', 'FIRMA', 'DIRECCION'
-            ]
-            
-            # Si detectamos una línea típica de pie de página al final, dejamos de agregar filas
-            if any(palabra in linea_upper for palabra in palabras_pie) and len(linea) > 25:
-                # Si ya llevamos bastantes transacciones, es muy probable que estemos en el pie de página final
-                if len(filas_procesadas) > 2:
-                    break
-                continue
-                
-            # Omitir líneas aisladas muy cortas o irrelevantes
-            if any(basura in linea_upper for basura in ['ATENTAMENTE', 'ESTIMADOS', 'PAGINA']):
-                continue
-                
-            # Intentar separar la fecha (formato DD/MM/YYYY)
-            if len(linea) > 10 and linea[2] == '/' and linea[5] == '/':
+            # Si la línea empieza con formato de fecha DD/MM/YYYY
+            if len(linea) >= 10 and linea[2] == '/' and linea[5] == '/':
                 fecha = linea[:10]
                 resto = linea[10:].strip()
                 filas_procesadas.append([fecha, resto])
             else:
-                # Si es una línea de continuación de la descripción anterior
+                # Si es una línea de continuación de la descripción de la transacción anterior
                 if filas_procesadas:
-                    # Nos aseguramos de no anexar texto que parezca pie de página institucional
-                    if not any(p in linea_upper for p in ['LTDA', 'S.A.', 'SPA', 'BANCO']):
-                        filas_procesadas[-1][1] += " " + linea
+                    filas_procesadas[-1][1] += " " + linea
                     
         if filas_procesadas:
             df = pd.DataFrame(filas_procesadas, columns=["FECHA", "DESCRIPCION_Y_MONTO"])
             return df
         else:
-            raise ValueError("No se pudieron estructurar las transacciones del PDF.")
+            raise ValueError("No se pudieron extraer transacciones válidas del PDF.")
             
     else:
         raise ValueError("Formato no soportado.")
