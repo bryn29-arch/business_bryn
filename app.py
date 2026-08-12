@@ -7,7 +7,7 @@ from utils.conciliacion import conciliar_cartera_y_cartola
 st.set_page_config(page_title="Conciliación Bancaria Inteligente", page_icon="🏦", layout="wide")
 
 st.title("🏦 Sistema de Conciliación Bancaria y Factoring")
-st.markdown("Herramienta automatizada con selección manual de columnas y conteo rápido de documentos.")
+st.markdown("Herramienta automatizada con previsualización exclusiva de cartola y conteo rápido de documentos.")
 
 # 1. Zona de Carga de Archivos
 col1, col2 = st.columns(2)
@@ -18,7 +18,7 @@ with col2:
 
 if file_cartola and file_ventas:
     try:
-        # Leemos la cartola (queda intacta)
+        # Leemos la cartola
         df_cartola = leer_archivo_subido(file_cartola)
         
         # Leemos la cartera de documentos en bruto para extraer sus encabezados y métricas
@@ -33,12 +33,15 @@ if file_cartola and file_ventas:
 
         st.success("✨ ¡Archivos cargados con éxito!")
 
-        # 2. INDICADOR RÁPIDO DE DOCUMENTOS (Sin vista previa pesada)
-        total_documentos = len(df_ventas_raw)
-        
-        st.info(f"📊 Archivo de documentos cargado correctamente. Se detectaron **{total_documentos:,}** registros y **{len(df_ventas_raw.columns)}** columnas.".replace(",", "."))
+        # 2. VISTA PREVIA EXCLUSIVA DE LA CARTOLA BANCARIA
+        st.subheader("🔍 Vista Previa de la Cartola Bancaria")
+        st.dataframe(df_cartola, use_container_width=True)
 
-        # 3. PANEL DE SELECCIÓN MANUAL DE COLUMNAS PARA LOS DOCUMENTOS
+        # 3. INDICADOR RÁPIDO DE DOCUMENTOS (Sin tabla pesada, solo resumen)
+        total_documentos = len(df_ventas_raw)
+        st.info(f"📊 Archivo de documentos cargado correctamente. Se detectaron **{total_documentos:,}** registros y **{len(df_ventas_raw.columns)}** columnas en la cartera.".replace(",", "."))
+
+        # 4. PANEL DE SELECCIÓN MANUAL DE COLUMNAS PARA LOS DOCUMENTOS
         st.subheader("⚙️ Mapeo Manual de Columnas del Archivo de Documentos")
         st.markdown("Indica qué columna de tu archivo corresponde a cada campo para asegurar un match perfecto:")
         
@@ -72,14 +75,14 @@ if file_cartola and file_ventas:
 
         st.divider()
 
-        # 4. Botón para ejecutar el motor de emparejamiento inteligente
+        # 5. Botón para ejecutar el motor de emparejamiento inteligente
         if st.button("🚀 Ejecutar Conciliación Inteligente", type="primary"):
             with st.spinner("Cruzando cartola con los documentos configurados..."):
                 df_cruce, df_pendientes = conciliar_cartera_y_cartola(df_cartola, df_ventas)
                 st.session_state['df_cruce'] = df_cruce
                 st.session_state['df_pendientes'] = df_pendientes
 
-        # 5. Mostrar resultados si ya se ejecutó
+        # 6. Mostrar resultados si ya se ejecutó
         if 'df_cruce' in st.session_state and not st.session_state['df_cruce'].empty:
             df_cruce = st.session_state['df_cruce']
             df_pendientes = st.session_state['df_pendientes']
