@@ -34,7 +34,7 @@ if file_cartola and file_ventas:
         st.success("✨ ¡Archivos cargados con éxito!")
 
         # 2. PANEL DE SELECCIÓN MANUAL DE COLUMNAS PARA LA CARTERA
-        st.subheader("⚙️ Mapeo Manual de Columnas de la Planilla de Cartera")
+        st.subheader("⚙️ Seleccion de Columnas")
         st.markdown("Elegir Columnas para conciliar:")
         
         columnas_disponibles = list(df_ventas_raw.columns)
