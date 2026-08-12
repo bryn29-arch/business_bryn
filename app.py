@@ -6,7 +6,7 @@ from utils.conciliacion import conciliar_cartera_y_cartola
 
 st.set_page_config(page_title="Conciliación Bancaria Inteligente", page_icon="🏦", layout="wide")
 
-st.title("🏦 Sistema de Conciliación Bancaria y Factoring")
+st.title("🏦 Sistema IRB")
 st.markdown("Herramienta automatizada con previsualización exclusiva de cartola y conteo rápido de documentos.")
 
 # 1. Zona de Carga de Archivos
@@ -42,8 +42,8 @@ if file_cartola and file_ventas:
         st.info(f"📊 Archivo de documentos cargado correctamente. Se detectaron **{total_documentos:,}** registros y **{len(df_ventas_raw.columns)}** columnas en la cartera.".replace(",", "."))
 
         # 4. PANEL DE SELECCIÓN MANUAL DE COLUMNAS PARA LOS DOCUMENTOS
-        st.subheader("⚙️ Mapeo Manual de Columnas del Archivo de Documentos")
-        st.markdown("Indica qué columna de tu archivo corresponde a cada campo para asegurar un match perfecto:")
+        st.subheader("⚙️ Mapeo de Columnas del Archivo de Documentos")
+        st.markdown("Indica qué columna :")
         
         columnas_disponibles = list(df_ventas_raw.columns)
 
