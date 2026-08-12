@@ -42,8 +42,8 @@ if file_cartola and file_ventas:
         st.info(f"📊 Archivo de documentos cargado correctamente. Se detectaron **{total_documentos:,}** registros y **{len(df_ventas_raw.columns)}** columnas en la cartera.".replace(",", "."))
 
         # 4. PANEL DE SELECCIÓN MANUAL DE COLUMNAS PARA LOS DOCUMENTOS
-        st.subheader("⚙️ Mapeo de Columnas del Archivo de Documentos")
-        st.markdown("Indica qué columna :")
+        st.subheader("⚙️ Seleccion de Columnas de Documentos")
+        st.markdown("Elegir columna :")
         
         columnas_disponibles = list(df_ventas_raw.columns)
 
