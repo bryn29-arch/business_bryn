@@ -6,8 +6,8 @@ from utils.conciliacion import conciliar_cartera_y_cartola
 
 st.set_page_config(page_title="Conciliación Bancaria Inteligente", page_icon="🏦", layout="wide")
 
-st.title("🏦 Sistema IRB")
-st.markdown("Herramienta automatizada con previsualización exclusiva de cartola y conteo rápido de documentos.")
+st.title("🏦 Sistema de Conciliación Bancaria y Factoring")
+st.markdown("Herramienta automatizada con selección de pestañas en Excel, vista previa de cartola y conteo rápido.")
 
 # 1. Zona de Carga de Archivos
 col1, col2 = st.columns(2)
@@ -21,15 +21,26 @@ if file_cartola and file_ventas:
         # Leemos la cartola
         df_cartola = leer_archivo_subido(file_cartola)
         
-        # Leemos la cartera de documentos en bruto para extraer sus encabezados y métricas
+        # Leemos la cartera de documentos detectando si tiene múltiples pestañas/hojas
         nombre_v = file_ventas.name.lower()
         if nombre_v.endswith('.csv'):
             try:
                 df_ventas_raw = pd.read_csv(file_ventas, sep=';', encoding='utf-8')
             except:
+                file_ventas.seek(0)
                 df_ventas_raw = pd.read_csv(file_ventas, sep=',', encoding='utf-8')
         else:
-            df_ventas_raw = pd.read_excel(file_ventas, sheet_name=0)
+            file_ventas.seek(0)
+            xls = pd.ExcelFile(file_ventas)
+            hojas = xls.sheet_names
+            if len(hojas) > 1:
+                st.info(f"📂 El archivo Excel contiene **{len(hojas)}** pestañas disponibles.")
+                hoja_seleccionada = st.selectbox("📌 Selecciona la pestaña/hoja de la cartera a procesar:", hojas)
+                file_ventas.seek(0)
+                df_ventas_raw = pd.read_excel(file_ventas, sheet_name=hoja_seleccionada)
+            else:
+                file_ventas.seek(0)
+                df_ventas_raw = pd.read_excel(file_ventas, sheet_name=0)
 
         st.success("✨ ¡Archivos cargados con éxito!")
 
@@ -37,13 +48,13 @@ if file_cartola and file_ventas:
         st.subheader("🔍 Vista Previa de la Cartola Bancaria")
         st.dataframe(df_cartola, use_container_width=True)
 
-        # 3. INDICADOR RÁPIDO DE DOCUMENTOS (Sin tabla pesada, solo resumen)
+        # 3. INDICADOR RÁPIDO DE DOCUMENTOS (Sin tabla pesada)
         total_documentos = len(df_ventas_raw)
-        st.info(f"📊 Archivo de documentos cargado correctamente. Se detectaron **{total_documentos:,}** registros y **{len(df_ventas_raw.columns)}** columnas en la cartera.".replace(",", "."))
+        st.info(f"📊 Cartera de documentos cargada. Se detectaron **{total_documentos:,}** registros y **{len(df_ventas_raw.columns)}** columnas en la hoja seleccionada.".replace(",", "."))
 
         # 4. PANEL DE SELECCIÓN MANUAL DE COLUMNAS PARA LOS DOCUMENTOS
-        st.subheader("⚙️ Seleccion de Columnas de Documentos")
-        st.markdown("Elegir columna :")
+        st.subheader("⚙️ Mapeo Manual de Columnas del Archivo de Documentos")
+        st.markdown("Indica qué columna de tu archivo corresponde a cada campo para asegurar un match perfecto:")
         
         columnas_disponibles = list(df_ventas_raw.columns)
 
@@ -113,4 +124,4 @@ if file_cartola and file_ventas:
     except Exception as e:
         st.error(f"Ocurrió un error al procesar la información: {str(e)}")
 else:
-    st.info("👈 Sube tu cartola bancaria y tu archivo de documentos para habilitar la selección manual de columnas.")
+    st.info("👈 Sube tu cartola bancaria y tu archivo de documentos para habilitar la selección de pestañas.")
