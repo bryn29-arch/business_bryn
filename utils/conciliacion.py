@@ -120,8 +120,9 @@ def conciliar_cartera_y_cartola(df_cartola, df_ventas):
             monto_ventas_tot = rows_matched['Monto_Real'].sum()
             dif = monto_banco - monto_ventas_tot
 
-            # Comprobar duplicidad de monto dentro de los candidatos del RUT
+            # Comprobar duplicidad de monto estricta dentro de los candidatos del RUT
             tiene_duplicidad = False
+            mismos_montos = pd.DataFrame()
             if rut_c and 'cand_rut' in locals() and not cand_rut.empty:
                 mismos_montos = cand_rut[cand_rut['Monto_Real'] == monto_banco]
                 if len(mismos_montos) > 1:
@@ -131,12 +132,11 @@ def conciliar_cartera_y_cartola(df_cartola, df_ventas):
             if dif == 0:
                 if tiene_duplicidad:
                     estado = '🟡 Con Observación'
-                    observacion_detalle = f'⚠️ Duplicidad: Existen {len(mismos_montos)} documentos con este mismo monto'
+                    observacion_detalle = f'⚠️ Duplicidad estricta: Existen {len(mismos_montos)} documentos con este mismo monto'
                 else:
                     estado = '🟢 Conciliado Exacto'
                     observacion_detalle = 'Monto y documentos cuadrados sin observaciones'
             else:
-                # Si hay cualquier diferencia, se marca como CON OBSERVACION
                 estado = '🟡 Con Observación'
                 if tiene_duplicidad:
                     observacion_detalle = f'⚠️ Diferencia de ${dif:,.0f} y existen {len(mismos_montos)} documentos duplicados'
@@ -171,4 +171,3 @@ def conciliar_cartera_y_cartola(df_cartola, df_ventas):
     df_pendientes = df_v[~df_v.index.isin(indices_ventas_usados)].copy()
     
     return df_cruce, df_pendientes
-
