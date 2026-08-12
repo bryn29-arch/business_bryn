@@ -4,13 +4,15 @@ import re
 import unicodedata
 
 def limpiar_nombre_columna(col):
-    """Limpia tildes, espacios y pasa a mayúsculas los nombres de las columnas."""
     col_str = str(col)
     nfkd_form = unicodedata.normalize('NFKD', col_str)
     return "".join([c for c in nfkd_form if not unicodedata.combining(c)]).strip().upper()
 
 def limpiar_monto_seguro(val):
-    """Convierte cualquier formato de monto (con puntos o comas) en un número real válido."""
+    """
+    Limpia y convierte montos en pesos chilenos (CLP).
+    Los puntos se tratan como separadores de miles y las comas como decimales.
+    """
     if pd.isna(val): 
         return 0.0
     if isinstance(val, (int, float)): 
@@ -20,15 +22,11 @@ def limpiar_monto_seguro(val):
     if not s:
         return 0.0
         
-    # Manejo de formatos numéricos chilenos/internacionales
-    if '.' in s and ',' in s:
-        if s.rfind('.') < s.rfind(','): 
-            s = s.replace('.', '').replace(',', '.')
-        else: 
-            s = s.replace(',', '')
-    elif ',' in s: 
-        s = s.replace(',', '.')
-    elif s.count('.') > 1:
+    # Si tiene coma, la coma es decimal y los puntos son miles
+    if ',' in s:
+        s = s.replace('.', '').replace(',', '.')
+    else:
+        # En Chile, los puntos en cartolas son separadores de miles (ej: 696.150 -> 696150)
         s = s.replace('.', '')
         
     s = re.sub(r'[^0-9.-]', '', s)
@@ -38,18 +36,12 @@ def limpiar_monto_seguro(val):
         return 0.0
 
 def leer_archivo_subido(archivo):
-    """
-    Lector universal para Excel, CSV y PDF bancario.
-    Estandariza columnas, montos y textos de forma automática.
-    """
     if archivo is None:
         return None
         
     nombre = archivo.name.lower()
     
-    # -------------------------------------------------------------
-    # 1. LECTURA DE ARCHIVOS EXCEL O CSV (Planilla de Ventas / Cartola Excel)
-    # -------------------------------------------------------------
+    # 1. Lectura de Excel o CSV
     if nombre.endswith(('.xlsx', '.xls', '.csv')):
         if nombre.endswith('.csv'):
             try:
@@ -59,13 +51,10 @@ def leer_archivo_subido(archivo):
         else:
             df = pd.read_excel(archivo, sheet_name=0)
             
-        # Estandarizar nombres de columnas
         df.columns = [limpiar_nombre_columna(c) for c in df.columns]
         return df
         
-    # -------------------------------------------------------------
-    # 2. LECTURA DE CARTOLAS BANCARIAS EN PDF
-    # -------------------------------------------------------------
+    # 2. Lectura de PDF Bancario
     elif nombre.endswith('.pdf'):
         lineas_crudas = []
         with pdfplumber.open(archivo) as pdf:
@@ -103,11 +92,11 @@ def leer_archivo_subido(archivo):
             fecha = tx[:10]
             resto = tx[10:].strip()
             
-            # Extraer monto al final del texto de la cartola
-            patron_monto = re.search(r'(-?[\d\.]+[\d]+)$', resto)
-            if patron_monto:
-                monto_str = patron_monto.group(1)
-                descripcion = resto[: -len(monto_str)].strip()
+            # Buscar el bloque numérico del monto al final de la línea
+            match = re.search(r'([\d\.]+)$', resto)
+            if match:
+                monto_str = match.group(1)
+                descripcion = resto[:-len(monto_str)].strip()
                 monto_limpio = limpiar_monto_seguro(monto_str)
                 filas_procesadas.append([fecha, descripcion, monto_limpio])
             else:
