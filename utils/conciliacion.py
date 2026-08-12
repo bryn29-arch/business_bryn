@@ -50,7 +50,7 @@ def buscar_combinacion_robusta(df_candidatos, monto_objetivo, col_monto='Monto_R
 
 def conciliar_cartera_y_cartola(df_cartola, df_ventas):
     """
-    Núcleo de cruce inteligente con validación estricta de diferencia cero y control de duplicidad.
+    Núcleo de cruce inteligente: Identifica entidad por RUT aunque el monto no cuadre.
     """
     if df_cartola is None or df_cartola.empty or df_ventas is None or df_ventas.empty:
         return pd.DataFrame(), pd.DataFrame()
@@ -85,7 +85,7 @@ def conciliar_cartera_y_cartola(df_cartola, df_ventas):
 
         match_indices = []
         tipo_match = "Sin Coincidencia"
-        observacion_detalle = "Sin observaciones"
+        observacion_detalle = "Sin documentos coincidentes"
         ventas_disponibles = df_v[~df_v.index.isin(indices_ventas_usados)]
 
         if monto_banco > 0:
@@ -120,23 +120,21 @@ def conciliar_cartera_y_cartola(df_cartola, df_ventas):
             monto_ventas_tot = rows_matched['Monto_Real'].sum()
             dif = monto_banco - monto_ventas_tot
 
-            # Comprobar duplicidad de monto dentro de los candidatos del RUT
             tiene_duplicidad = False
+            mismos_montos = pd.DataFrame()
             if rut_c and 'cand_rut' in locals() and not cand_rut.empty:
                 mismos_montos = cand_rut[cand_rut['Monto_Real'] == monto_banco]
                 if len(mismos_montos) > 1:
                     tiene_duplicidad = True
 
-            # REGLA ESTRICTA: La diferencia debe ser exactamente 0 para considerarse conciliado con éxito
             if dif == 0:
                 if tiene_duplicidad:
                     estado = '🟡 Con Observación'
-                    observacion_detalle = f'⚠️ Duplicidad: Existen {len(mismos_montos)} documentos con este mismo monto'
+                    observacion_detalle = f'⚠️ Duplicidad estricta: Existen {len(mismos_montos)} documentos con este mismo monto'
                 else:
                     estado = '🟢 Conciliado Exacto'
                     observacion_detalle = 'Monto y documentos cuadrados sin observaciones'
             else:
-                # Si hay cualquier diferencia, se marca como CON OBSERVACION
                 estado = '🟡 Con Observación'
                 if tiene_duplicidad:
                     observacion_detalle = f'⚠️ Diferencia de ${dif:,.0f} y existen {len(mismos_montos)} documentos duplicados'
@@ -155,16 +153,30 @@ def conciliar_cartera_y_cartola(df_cartola, df_ventas):
                 'Detalle / Advertencia': observacion_detalle
             })
         else:
+            # CASO NUEVO: Si no hubo match por monto o combinación, pero SÍ se encontró un RUT en la glosa
+            entidad_identificada = 'NO IDENTIFICADO'
+            tipo_match_parcial = 'Sin Coincidencia'
+            estado_parcial = '🔴 Abono No Identificado'
+            
+            if rut_c:
+                # Buscamos en toda la cartera el nombre de la empresa asociada a ese RUT
+                cand_rut_global = df_v[df_v['RUT_Norm'] == rut_c]
+                if not cand_rut_global.empty:
+                    entidad_identificada = cand_rut_global.iloc[0][col_cliente] if col_cliente in cand_rut_global.columns else 'N/A'
+                    tipo_match_parcial = '🟡 RUT Identificado (Monto No Cuadra)'
+                    estado_parcial = '🟡 Con Observación'
+                    observacion_detalle = 'El RUT de la glosa existe en cartera, pero el monto no coincide con documentos'
+            
             cruce_list.append({
                 'Descripción Cartola': texto_desc_raw,
                 'Monto Banco ($)': monto_banco,
                 'Folio(s) Matcheado(s)': 'N/A',
-                'Entidad / Deudor': 'NO IDENTIFICADO',
-                'Tipo Coincidencia': 'Sin Coincidencia',
+                'Entidad / Deudor': entidad_identificada,
+                'Tipo Coincidencia': tipo_match_parcial,
                 'Monto Cartera ($)': 0,
                 'Diferencia ($)': monto_banco,
-                'Estado Conciliación': '🔴 Abono No Identificado',
-                'Detalle / Advertencia': 'Sin documentos coincidentes'
+                'Estado Conciliación': estado_parcial,
+                'Detalle / Advertencia': observacion_detalle
             })
 
     df_cruce = pd.DataFrame(cruce_list)
