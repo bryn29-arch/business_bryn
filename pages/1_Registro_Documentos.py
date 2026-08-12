@@ -1,6 +1,11 @@
 import streamlit as st
 import pandas as pd
 import io
+import sys
+import os
+
+# Esto le indica a Python que busque la carpeta utils en la raíz del proyecto
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 st.set_page_config(
     page_title="Registro de Documentos", 
