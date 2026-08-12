@@ -1,12 +1,46 @@
 import pandas as pd
 import pdfplumber
 import re
+import unicodedata
+
+def limpiar_nombre_columna(col):
+    """Limpia tildes, espacios y pasa a mayúsculas los nombres de las columnas."""
+    col_str = str(col)
+    nfkd_form = unicodedata.normalize('NFKD', col_str)
+    return "".join([c for c in nfkd_form if not unicodedata.combining(c)]).strip().upper()
+
+def limpiar_monto_seguro(val):
+    """Convierte cualquier formato de monto (con puntos o comas) en un número real válido."""
+    if pd.isna(val): 
+        return 0.0
+    if isinstance(val, (int, float)): 
+        return float(val)
+    
+    s = str(val).strip().replace('$', '').replace(' ', '')
+    if not s:
+        return 0.0
+        
+    # Manejo de formatos numéricos chilenos/internacionales
+    if '.' in s and ',' in s:
+        if s.rfind('.') < s.rfind(','): 
+            s = s.replace('.', '').replace(',', '.')
+        else: 
+            s = s.replace(',', '')
+    elif ',' in s: 
+        s = s.replace(',', '.')
+    elif s.count('.') > 1:
+        s = s.replace('.', '')
+        
+    s = re.sub(r'[^0-9.-]', '', s)
+    try: 
+        return float(s)
+    except: 
+        return 0.0
 
 def leer_archivo_subido(archivo):
     """
-    Lector universal adaptado para cartolas bancarias de Chile (cualquier banco).
-    Identifica de manera flexible nombres de columnas como Fecha, Descripción, Monto, 
-    Cargos, Abonos, Débito o Crédito para estandarizarlas de cara al match con Excel.
+    Lector universal para Excel, CSV y PDF bancario.
+    Estandariza columnas, montos y textos de forma automática.
     """
     if archivo is None:
         return None
@@ -14,7 +48,7 @@ def leer_archivo_subido(archivo):
     nombre = archivo.name.lower()
     
     # -------------------------------------------------------------
-    # 1. PROCESAMIENTO DE ARCHIVOS EXCEL (.xlsx, .xls) O CSV
+    # 1. LECTURA DE ARCHIVOS EXCEL O CSV (Planilla de Ventas / Cartola Excel)
     # -------------------------------------------------------------
     if nombre.endswith(('.xlsx', '.xls', '.csv')):
         if nombre.endswith('.csv'):
@@ -25,68 +59,35 @@ def leer_archivo_subido(archivo):
         else:
             df = pd.read_excel(archivo, sheet_name=0)
             
-        # Normalizar nombres de columnas del Excel/CSV subido para buscar equivalencias chilenas
-        columnas_originales = df.columns
-        mapa_columnas = {}
-        
-        for col in columnas_originales:
-            col_clean = str(col).strip().upper()
-            # Mapear Fecha
-            if any(k in col_clean for k in ['FECHA', 'F. MOV', 'F_MOV', 'DATE']):
-                mapa_columnas[col] = 'FECHA'
-            # Mapear Descripción o Detalle
-            elif any(k in col_clean for k in ['DESC', 'DETALLE', 'GLOSA', 'MOVIMIENTO', 'DESCRIPCION', 'CONCEPTO']):
-                mapa_columnas[col] = 'DESCRIPCION'
-            # Mapear Monto / Importe
-            elif any(k in col_clean for k in ['MONTO', 'IMPORTE', 'VALOR', 'SALDO']):
-                if 'CARGO' not in col_clean and 'ABONO' not in col_clean:
-                    mapa_columnas[col] = 'MONTO'
-            # Mapear Cargos / Débitos / Retiros
-            elif any(k in col_clean for k in ['CARGO', 'DEBITO', 'RETIRO', 'EGRESO']):
-                mapa_columnas[col] = 'CARGOS'
-            # Mapear Abonos / Créditos / Depósitos
-            elif any(k in col_clean for k in ['ABONO', 'CREDITO', 'DEPOSITO', 'INGRESO']):
-                mapa_columnas[col] = 'ABONOS'
-                
-        df = df.rename(columns=mapa_columnas)
+        # Estandarizar nombres de columnas
+        df.columns = [limpiar_nombre_columna(c) for c in df.columns]
         return df
         
     # -------------------------------------------------------------
-    # 2. PROCESAMIENTO DE CARTOLAS BANCARIAS EN PDF (Multibanco Chileno)
+    # 2. LECTURA DE CARTOLAS BANCARIAS EN PDF
     # -------------------------------------------------------------
     elif nombre.endswith('.pdf'):
         lineas_crudas = []
-        
         with pdfplumber.open(archivo) as pdf:
             for pagina in pdf.pages:
                 texto = pagina.extract_text()
                 if texto:
                     for linea in texto.split('\n'):
-                        linea_limpia = linea.strip()
-                        if linea_limpia:
-                            lineas_crudas.append(linea_limpia)
+                        if linea.strip():
+                            lineas_crudas.append(linea.strip())
                             
         lineas_utiles = []
         comenzar_captura = False
         
         for linea in lineas_crudas:
             linea_upper = linea.upper()
-            
             if not comenzar_captura:
-                # Detección amplia de inicio de transacciones para diferentes bancos en Chile
-                if ('/' in linea and len(linea) >= 10 and linea[2] == '/' and linea[5] == '/') and any(kw in linea_upper for kw in ['TRASPASO', 'PAGO', 'DEPOSITO', 'ABONO', 'TRANSFERENCIA', 'COMPRA', 'RETIRO', 'CARGO', 'COMISION', 'REDCOMPRA', 'CAJERO']):
+                if ('/' in linea and len(linea) >= 10 and linea[2] == '/' and linea[5] == '/') and any(kw in linea_upper for kw in ['TRASPASO', 'PAGO', 'DEPOSITO', 'ABONO', 'TRANSFERENCIA', 'COMPRA', 'RETIRO', 'CARGO']):
                     comenzar_captura = True
             
             if comenzar_captura:
-                es_pie_o_basura = any(basura in linea_upper for basura in [
-                    'ATENTAMENTE', 'ESTIMADOS', 'CORREO:', 'ASUNTO:', 'CC:', 'PARA:', 
-                    'DOCUMENTO ELECTRONICO', 'CASA MATRIZ', 'ATENCION CLIENTES', 'SALDO CONTABLE', 'SALDO DISPONIBLE'
-                ])
-                
-                if linea_upper.startswith('PAGINA') or (linea.isdigit() and len(linea) <= 2):
-                    continue
-                    
-                if not es_pie_o_basura and len(linea) > 2:
+                es_basura = any(b in linea_upper for b in ['ATENTAMENTE', 'ESTIMADOS', 'PAGINA', 'SALDO CONTABLE', 'SALDO DISPONIBLE'])
+                if not es_basura and len(linea) > 2:
                     lineas_utiles.append(linea)
                     
         transacciones_crudas = []
@@ -102,21 +103,21 @@ def leer_archivo_subido(archivo):
             fecha = tx[:10]
             resto = tx[10:].strip()
             
-            # Patrón flexible para montos en pesos chilenos (admite puntos de miles y signo negativo/positivo)
+            # Extraer monto al final del texto de la cartola
             patron_monto = re.search(r'(-?[\d\.]+[\d]+)$', resto)
-            
             if patron_monto:
                 monto_str = patron_monto.group(1)
                 descripcion = resto[: -len(monto_str)].strip()
-                filas_procesadas.append([fecha, descripcion, monto_str])
+                monto_limpio = limpiar_monto_seguro(monto_str)
+                filas_procesadas.append([fecha, descripcion, monto_limpio])
             else:
-                filas_procesadas.append([fecha, resto, ""])
+                filas_procesadas.append([fecha, resto, 0.0])
                 
         if filas_procesadas:
             df = pd.DataFrame(filas_procesadas, columns=["FECHA", "DESCRIPCION", "MONTO"])
             return df
         else:
-            raise ValueError("No se pudieron estructurar las columnas de transacciones del PDF.")
+            raise ValueError("No se pudieron estructurar las transacciones del PDF.")
             
     else:
         raise ValueError("Formato no soportado.")
