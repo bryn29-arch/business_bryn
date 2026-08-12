@@ -18,7 +18,7 @@ with col2:
 
 if file_cartola and file_ventas:
     try:
-        # Leemos la cartola (la dejamos intacta tal como me pediste)
+        # Leemos la cartola (queda intacta)
         df_cartola = leer_archivo_subido(file_cartola)
         
         # Leemos la cartera de ventas en bruto para extraer sus encabezados
@@ -39,7 +39,6 @@ if file_cartola and file_ventas:
         
         columnas_disponibles = list(df_ventas_raw.columns)
 
-        # Funciones auxiliares para pre-seleccionar inteligentemente si existen nombres parecidos
         def buscar_indice_defecto(lista, opciones):
             for op in opciones:
                 for idx, col in enumerate(lista):
@@ -58,7 +57,7 @@ if file_cartola and file_ventas:
         with c4:
             col_sel_cliente = st.selectbox("🏢 Columna de Cliente / Deudor", columnas_disponibles, index=buscar_indice_defecto(columnas_disponibles, ['CLIENTE', 'DEUDOR', 'EMPRESA', 'RAZON']))
 
-        # Normalizamos el DataFrame de ventas renombrando las columnas según la selección del usuario
+        # Normalizamos renombrando las columnas con sufijos internos estandarizados
         df_ventas = df_ventas_raw.rename(columns={
             col_sel_rut: 'RUT_DEUDOR_MAP',
             col_sel_monto: 'MONTO_MAP',
@@ -68,7 +67,7 @@ if file_cartola and file_ventas:
 
         st.divider()
 
-        # 3. Vista previa de la cartola y cartera configurada
+        # 3. Vista previa de los datos
         with st.expander("👁️ Ver Vista Previa de Datos Procesados"):
             tab1, tab2 = st.tabs(["Cartola Bancaria", "Cartera de Ventas Configurada"])
             with tab1:
@@ -114,4 +113,4 @@ if file_cartola and file_ventas:
     except Exception as e:
         st.error(f"Ocurrió un error al procesar la información: {str(e)}")
 else:
-    st.info("👈 Sube tu cartola bancaria y tu cartera de ventas para habilitar la selección manual de columnas.")rtera de ventas en Excel para iniciar el cruce.")
+    st.info("👈 Sube tu cartola bancaria y tu cartera de ventas para habilitar la selección manual de columnas.")
