@@ -2,15 +2,6 @@ import pandas as pd
 import itertools
 from utils.limpieza import limpiar_monto_entero, extraer_rut, expandir_y_limpiar_texto
 
-def encontrar_columna(columnas, palabras_clave):
-    """Busca de forma inteligente una columna que contenga alguna de las palabras clave."""
-    cols_limpias = {col: str(col).strip().upper() for col in columnas}
-    for palabra in palabras_clave:
-        for col_orig, col_limpia in cols_limpias.items():
-            if palabra in col_limpia:
-                return col_orig
-    return None
-
 def buscar_combinacion_robusta(df_candidatos, monto_objetivo, col_monto='Monto_Real', tolerancia=0):
     """
     Busca de manera eficiente qué combinación de documentos suma exactamente el monto objetivo del banco.
@@ -50,7 +41,7 @@ def buscar_combinacion_robusta(df_candidatos, monto_objetivo, col_monto='Monto_R
 
 def conciliar_cartera_y_cartola(df_cartola, df_ventas):
     """
-    Núcleo de cruce inteligente con validación cruzada de RUT entre cartola y documentos.
+    Núcleo de cruce inteligente utilizando las columnas mapeadas manualmente por el usuario.
     """
     if df_cartola is None or df_cartola.empty or df_ventas is None or df_ventas.empty:
         return pd.DataFrame(), pd.DataFrame()
@@ -59,14 +50,17 @@ def conciliar_cartera_y_cartola(df_cartola, df_ventas):
     indices_ventas_usados = set()
     df_v = df_ventas.copy()
 
-    col_cliente = encontrar_columna(df_v.columns, ['CLIENTE', 'DEUDOR', 'EMPRESA', 'RAZON']) or df_v.columns[0]
-    col_rut = encontrar_columna(df_v.columns, ['RUT DEUDOR', 'RUT. DEUDOR', 'RUT_DEUDOR', 'RUT DEU', 'RUT'])
-    col_monto_v = encontrar_columna(df_v.columns, ['ADEUDADO', 'MONTO TOT', 'MONTO', 'SALDO'])
-    col_folio = encontrar_columna(df_v.columns, ['DOC', 'FOLIO', 'FACTURA', 'NUMERO'])
+    # Mapeo directo de las columnas seleccionadas en la interfaz de Streamlit
+    col_cliente = 'CLIENTE_MAP' if 'CLIENTE_MAP' in df_v.columns else df_v.columns[0]
+    col_rut = 'RUT_DEUDOR_MAP' if 'RUT_DEUDOR_MAP' in df_v.columns else None
+    col_monto_v = 'MONTO_MAP' if 'MONTO_MAP' in df_v.columns else None
+    col_folio = 'FOLIO_MAP' if 'FOLIO_MAP' in df_v.columns else None
 
-    col_desc_c = encontrar_columna(df_cartola.columns, ['DESCRIPCION', 'DETALLE', 'GLOSA', 'MOVIMIENTO']) or df_cartola.columns[1] if len(df_cartola.columns) > 1 else df_cartola.columns[0]
-    col_monto_c = encontrar_columna(df_cartola.columns, ['MONTO', 'ABONOS', 'CREDITO'])
+    # Identificar columnas clave en la cartola
+    col_desc_c = 'DESCRIPCION' if 'DESCRIPCION' in df_cartola.columns else (df_cartola.columns[1] if len(df_cartola.columns) > 1 else df_cartola.columns[0])
+    col_monto_c = 'MONTO' if 'MONTO' in df_cartola.columns else None
 
+    # Normalizar datos de la cartera
     df_v['RUT_Norm'] = df_v[col_rut].apply(extraer_rut) if col_rut else df_v.apply(lambda r: extraer_rut(" ".join(str(v) for v in r.values)), axis=1)
     
     if col_monto_v:
@@ -74,6 +68,7 @@ def conciliar_cartera_y_cartola(df_cartola, df_ventas):
     else:
         df_v['Monto_Real'] = df_v.apply(lambda r: max([limpiar_monto_entero(v) for v in r.values] + [0]), axis=1)
 
+    # Recorrer cada movimiento de la cartola
     for idx_c, row_c in df_cartola.iterrows():
         texto_desc_raw = str(row_c[col_desc_c]) if col_desc_c in row_c else " ".join([str(v) for v in row_c.values if pd.notna(v)])
         rut_c = extraer_rut(texto_desc_raw)
@@ -120,7 +115,7 @@ def conciliar_cartera_y_cartola(df_cartola, df_ventas):
             monto_ventas_tot = rows_matched['Monto_Real'].sum()
             dif = monto_banco - monto_ventas_tot
 
-            # Validación estricta: ¿El RUT de la cartola coincide con el RUT del cliente del documento matcheado?
+            # Validar si el RUT de la cartola difiere del documento matcheado
             ruts_en_match = set(rows_matched['RUT_Norm'].dropna().unique())
             rut_discrepancia = False
             if rut_c and ruts_en_match and rut_c not in ruts_en_match:
@@ -133,6 +128,7 @@ def conciliar_cartera_y_cartola(df_cartola, df_ventas):
                 if len(mismos_montos) > 1:
                     tiene_duplicidad = True
 
+            # REGLA ESTRICTA: Diferencia cero para éxito limpio
             if dif == 0 and not rut_discrepancia:
                 if tiene_duplicidad:
                     estado = '🟡 Con Observación'
@@ -144,15 +140,13 @@ def conciliar_cartera_y_cartola(df_cartola, df_ventas):
                 estado = '🟡 Con Observación'
                 observaciones_lista = []
                 if rut_discrepancia:
-                    observaciones_lista.append(f'⚠️ RUT de cartola ({rut_c}) difiere del documento matcheado ({", ".join(ruts_en_match)}) - Posible pago de tercero')
+                    observaciones_lista.append(f'⚠️ RUT de cartola ({rut_c}) difiere del documento matcheado ({", ".join(ruts_en_match)})')
                 if tiene_duplicidad:
                     observaciones_lista.append(f'⚠️ Existen {len(mismos_montos)} documentos duplicados con este monto')
                 if dif != 0:
                     observaciones_lista.append(f'⚠️ Diferencia de ${dif:,.0f} respecto a cartera')
                 
                 observacion_detalle = " | ".join(observaciones_lista) if observaciones_lista else f'⚠️ Diferencia de ${dif:,.0f}'
-                if rut_discrepancia and "RUT Cartola Difiere" not in tipo_match:
-                    tipo_match = "🟡 Coincidencia por Monto (RUT Cartola Difiere)"
 
             cruce_list.append({
                 'Descripción Cartola': texto_desc_raw,
@@ -166,7 +160,6 @@ def conciliar_cartera_y_cartola(df_cartola, df_ventas):
                 'Detalle / Advertencia': observacion_detalle
             })
         else:
-            # CASO: Si no hubo match por monto o combinación
             entidad_identificada = 'NO IDENTIFICADO'
             tipo_match_parcial = 'Sin Coincidencia'
             estado_parcial = '🔴 Abono No Identificado'
