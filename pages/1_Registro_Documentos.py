@@ -13,21 +13,20 @@ st.set_page_config(
 
 st.title("📂 Extracción Inteligente y Registro de Documentos (PDF, Excel, CSV)")
 st.markdown("""
-Sube tus documentos de respaldo. El sistema **extraerá automáticamente los datos clave** y podrás gestionar la tabla 
-marcando con un **check** las filas que desees eliminar.
+Sube tus documentos de respaldo. El sistema **extraerá automáticamente los datos clave** (Fecha de Emisión, RUT, Folio, Monto e IVA) 
+y podrás gestionar la tabla marcando con un **check** las filas que desees eliminar.
 """)
 
-# Inicializar memoria de sesión con todas las columnas necesarias
+# Inicializar memoria de sesión con la columna 'FECHA EMISIÓN'
 if 'df_registro_global' not in st.session_state:
     st.session_state['df_registro_global'] = pd.DataFrame(columns=[
-        'SELECCIONAR', 'ID', 'NOMBRE DE ARCHIVO', 'FECHA', 'RUT', 'N° DOCUMENTO', 'MONTO', 'IVA', 'TIPO', 'TAMAÑO', 'ESTADO'
+        'SELECCIONAR', 'ID', 'NOMBRE DE ARCHIVO', 'FECHA EMISIÓN', 'RUT', 'N° DOCUMENTO', 'MONTO', 'IVA', 'TIPO', 'TAMAÑO', 'ESTADO'
     ])
 
-# Función inteligente y robusta para extraer datos clave desde el texto de un PDF
+# Función inteligente para extraer datos clave desde el texto de un PDF
 def extraer_datos_pdf(archivo_pdf):
     texto_completo = ""
     try:
-        # Creamos un flujo seguro en memoria para evitar conflictos con el puntero de Streamlit
         bytes_data = archivo_pdf.read()
         archivo_pdf.seek(0)
         
@@ -42,8 +41,13 @@ def extraer_datos_pdf(archivo_pdf):
     rut_match = re.search(r'\b\d{1,2}\.\d{3}\.\d{3}-[0-9kK]\b|\b\d{7,8}-[0-9kK]\b', texto_completo)
     rut_encontrado = rut_match.group(0) if rut_match else "No Detectado"
 
-    fecha_match = re.search(r'\b\d{2}[-/]\d{2}[-/]\d{4}\b', texto_completo)
-    fecha_encontrada = fecha_match.group(0) if fecha_match else "No Detectada"
+    # Búsqueda optimizada para fecha de emisión (prioriza etiquetas o formato DD/MM/YYYY)
+    fecha_match = re.search(r'(?:Fecha\s*(?:de)?\s*Emisi[oó]n|Emisi[oó]n)[\s.:#]*(\b\d{2}[-/]\d{2}[-/]\d{4}\b)', texto_completo, re.IGNORECASE)
+    if not fecha_match:
+        # Búsqueda general de fecha si no encuentra la etiqueta exacta
+        fecha_match = re.search(r'\b\d{2}[-/]\d{2}[-/]\d{4}\b', texto_completo)
+    
+    fecha_encontrada = fecha_match.group(1) if fecha_match and len(fecha_match.groups()) > 0 else (fecha_match.group(0) if fecha_match else "No Detectada")
 
     folio_match = re.search(r'(?:Folio|N°|Factura|Boleta)[\s.:#]*(\d+)', texto_completo, re.IGNORECASE)
     folio_encontrado = folio_match.group(1) if folio_match else "S/F"
@@ -55,7 +59,7 @@ def extraer_datos_pdf(archivo_pdf):
     iva_encontrado = iva_match.group(1) if iva_match else "0"
 
     return {
-        'FECHA': fecha_encontrada,
+        'FECHA EMISIÓN': fecha_encontrada,
         'RUT': rut_encontrado,
         'N° DOCUMENTO': folio_encontrado,
         'MONTO': monto_encontrado,
@@ -127,7 +131,7 @@ if archivos_subidos:
                 archivo_obj.seek(0)
                 
                 st.info("💡 Estos son los datos detectados automáticamente.")
-                st.metric("📅 Fecha Detectada", datos_extraidos['FECHA'])
+                st.metric("📅 Fecha de Emisión", datos_extraidos['FECHA EMISIÓN'])
                 st.metric("🏢 RUT Identificado", datos_extraidos['RUT'])
                 st.metric("📄 N° de Documento / Folio", datos_extraidos['N° DOCUMENTO'])
                 st.metric("💰 Monto Total", f"$ {datos_extraidos['MONTO']}")
@@ -146,7 +150,7 @@ if archivos_subidos:
                     arc.seek(0)
                     d = extraer_datos_pdf(arc)
                     arc.seek(0)
-                    f_val = d['FECHA']
+                    f_val = d['FECHA EMISIÓN']
                     rut_val = d['RUT']
                     doc_val = d['N° DOCUMENTO']
                     monto_val = d['MONTO']
@@ -162,7 +166,7 @@ if archivos_subidos:
                     'SELECCIONAR': False,
                     'ID': f"{arc.name}_{arc.size}",
                     'NOMBRE DE ARCHIVO': arc.name,
-                    'FECHA': f_val,
+                    'FECHA EMISIÓN': f_val,
                     'RUT': rut_val,
                     'N° DOCUMENTO': doc_val,
                     'MONTO': monto_val,
@@ -192,7 +196,7 @@ if not st.session_state['df_registro_global'].empty:
     columnas_a_ocultar = ['NOMBRE DE ARCHIVO', 'TIPO', 'TAMAÑO', 'ID']
     df_vista = st.session_state['df_registro_global'].drop(columns=columnas_a_ocultar, errors='ignore')
     
-    # Reordenamos: 'SELECCIONAR' al principio y 'ESTADO' al final
+    # Reordenamos: 'SELECCIONAR' al principio, datos en medio y 'ESTADO' al final
     columnas_intermedias = [col for col in df_vista.columns if col not in ['SELECCIONAR', 'ESTADO']]
     nuevo_orden = []
     if 'SELECCIONAR' in df_vista.columns:
@@ -239,7 +243,7 @@ if not st.session_state['df_registro_global'].empty:
     with col_b2:
         if st.button("⚠️ Vaciar Todo el Historial"):
             st.session_state['df_registro_global'] = pd.DataFrame(columns=[
-                'SELECCIONAR', 'ID', 'NOMBRE DE ARCHIVO', 'FECHA', 'RUT', 'N° DOCUMENTO', 'MONTO', 'IVA', 'TIPO', 'TAMAÑO', 'ESTADO'
+                'SELECCIONAR', 'ID', 'NOMBRE DE ARCHIVO', 'FECHA EMISIÓN', 'RUT', 'N° DOCUMENTO', 'MONTO', 'IVA', 'TIPO', 'TAMAÑO', 'ESTADO'
             ])
             st.success("🧹 Historial vaciado por completo.")
             st.rerun()
