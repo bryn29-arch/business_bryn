@@ -50,7 +50,34 @@ def limpiar_nombre_deudor(texto):
   return re.sub(r'\s+', ' ', texto_limpio).strip().strip('-/_').strip()
 
 
-# Función avanzada de extracción blindada contra espacios en RUTs y bloques DTE
+def _cortar_por_palabras_clave(texto, palabras_clave):
+  """Corta el texto en el primer punto donde aparece una palabra clave
+  de una columna vecina que pdfplumber fusionó por error en la misma línea
+  (ocurre cuando dos columnas del PDF quedan a la misma altura vertical)."""
+  if not texto:
+    return texto
+  texto_up = texto.upper()
+  posiciones = [
+      texto_up.find(p.upper()) for p in palabras_clave if p.upper() in texto_up
+  ]
+  if posiciones:
+    return texto[: min(posiciones)].strip(' -:')
+  return texto.strip()
+
+
+PALABRAS_CORTE_EMISOR = [
+    'FACTURA', 'GUIA DE DESPACHO', 'BOLETA', 'NOTA DE CREDITO',
+    'NOTA DE DEBITO', 'EXENTA', 'ELECTRONICA', 'GIRO:', 'R.U.T',
+    'TIPO DE VENTA', 'FECHA EMISION', 'S.I.I',
+]
+
+PALABRAS_CORTE_DEUDOR = [
+    'FECHA EMISION', 'GIRO:', 'R.U.T', 'RUT', 'S.I.I', 'DIRECCION', 'COMUNA',
+]
+
+
+# Función avanzada de extracción blindada contra espacios en RUTs, bloques DTE
+# y columnas fusionadas por pdfplumber
 def extraer_datos_pdf(archivo_pdf):
   lineas_texto = []
   texto_completo = ''
@@ -102,6 +129,13 @@ def extraer_datos_pdf(archivo_pdf):
         nombre_emisor = l
         break
 
+  # 🛠️ Corta el nombre del emisor si viene fusionado con el recuadro
+  # "FACTURA ELECTRONICA" de la columna vecina
+  if nombre_emisor != 'No Detectado':
+    nombre_emisor = _cortar_por_palabras_clave(
+        nombre_emisor, PALABRAS_CORTE_EMISOR
+    )
+
   # 3. Número de Documento (Folio)
   num_doc = 'S/F'
   match_folio = re.search(
@@ -130,13 +164,24 @@ def extraer_datos_pdf(archivo_pdf):
           r'SEÑOR\(ES\):?|SENOR\(ES\):?|SEÑOR\(ES\)', linea, flags=re.IGNORECASE
       )
       if len(partes) > 1 and partes[1].strip():
-        deudor_lineas.append(partes[1].strip())
+        # 🛠️ Corta si "Fecha Emision:" u otra columna vecina quedó pegada
+        texto_limpio = _cortar_por_palabras_clave(
+            partes[1].strip(), PALABRAS_CORTE_DEUDOR
+        )
+        if texto_limpio:
+          deudor_lineas.append(texto_limpio)
       continue
     if capturando:
       if 'R.U.T.' in linea_up or 'RUT' in linea_up or 'GIRO:' in linea_up:
         break
       if linea:
-        deudor_lineas.append(linea)
+        texto_limpio = _cortar_por_palabras_clave(linea, PALABRAS_CORTE_DEUDOR)
+        if texto_limpio:
+          deudor_lineas.append(texto_limpio)
+        # Si esta línea traía una columna vecina fusionada, detenemos
+        # la captura aquí (ya llegamos al final del nombre del deudor)
+        if texto_limpio != linea.strip():
+          break
 
   if deudor_lineas:
     nombre_deudor = limpiar_nombre_deudor(' '.join(deudor_lineas))
