@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import io
-import base64
+import fitz  # PyMuPDF para renderizar PDFs como imágenes sin bloqueo de Chrome
 
 st.set_page_config(
     page_title="Gestión y Registro de Documentos",
@@ -11,8 +11,8 @@ st.set_page_config(
 
 st.title("📂 Registro, Previsualización y Control de Documentos")
 st.markdown("""
-Sube tus documentos de respaldo (PDFs, Excel, CSV), revísalos **directamente en pantalla** para asegurarte de que son los correctos, 
-regístralos oficialmente y borra lo que necesites.
+Sube tus documentos de respaldo. Podrás ver la **vista previa directa en pantalla** (convertida de forma segura para evitar bloqueos de Chrome), 
+validarlos, registrarlos oficialmente y gestionar o borrar registros si lo necesitas.
 """)
 
 # Inicializar memoria de sesión para el registro acumulativo
@@ -31,7 +31,7 @@ with st.container(border=True):
         key="uploader_principal"
     )
 
-# 2. Vista Previa Directa en Pantalla (Sin descargas)
+# 2. Vista Previa Directa en Pantalla (A prueba de bloqueos de Chrome)
 if archivos_subidos:
     st.divider()
     st.markdown("### 👁️ 2. Vista Previa Directa en Pantalla")
@@ -46,18 +46,21 @@ if archivos_subidos:
         
         if ext == 'pdf':
             try:
-                # Leemos los bytes del PDF subido
                 bytes_pdf = archivo_obj.read()
-                base64_pdf = base64.b64encode(bytes_pdf).decode('utf-8')
+                # Abrimos el PDF con PyMuPDF
+                doc = fitz.open(stream=bytes_pdf, filetype="pdf")
+                st.info(f"📄 Visualizando **{archivo_obj.name}** — Total de páginas: **{len(doc)}**")
                 
-                # Usamos un visor seguro embebido con parámetros que evitan el bloqueo de Chrome
-                pdf_html = f'<iframe src="data:application/pdf;base64,{base64_pdf}#view=FitH" width="100%" height="600px" style="border: none;"></iframe>'
-                st.markdown(pdf_html, unsafe_allow_html=True)
+                # Renderizamos cada página del PDF como imagen para mostrarla sin iframes bloqueados
+                for i, page in enumerate(doc):
+                    pix = page.get_pixmap(dpi=150)  # Calidad de imagen óptima
+                    img_bytes = pix.tobytes("png")
+                    st.image(img_bytes, caption=f"Página {i + 1} de {len(doc)}", use_container_width=True)
                 
-                # Restauramos el puntero del archivo para que no falle al registrarse después
+                # Restauramos el puntero del archivo
                 archivo_obj.seek(0)
             except Exception as e:
-                st.error(f"No se pudo mostrar la vista previa del PDF: {e}")
+                st.error(f"No se pudo renderizar la vista previa del PDF: {e}")
                 
         elif ext in ['xlsx', 'xls']:
             try:
