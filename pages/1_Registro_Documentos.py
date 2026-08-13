@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import io
+import base64
 
 st.set_page_config(
     page_title="Gestión y Registro de Documentos",
@@ -10,8 +11,8 @@ st.set_page_config(
 
 st.title("📂 Registro, Previsualización y Control de Documentos")
 st.markdown("""
-Sube tus documentos de respaldo (PDFs, Excel, CSV), revísalos de forma segura, 
-regístralos oficialmente y **elimina cualquier archivo** del historial si es necesario.
+Sube tus documentos de respaldo (PDFs, Excel, CSV), revísalos **directamente en pantalla** para asegurarte de que son los correctos, 
+regístralos oficialmente y borra lo que necesites.
 """)
 
 # Inicializar memoria de sesión para el registro acumulativo
@@ -30,13 +31,13 @@ with st.container(border=True):
         key="uploader_principal"
     )
 
-# 2. Vista Previa y Validación antes del registro (Sin bloqueos de Chrome)
+# 2. Vista Previa Directa en Pantalla (Sin descargas)
 if archivos_subidos:
     st.divider()
-    st.markdown("### 👁️ 2. Vista Previa y Validación")
+    st.markdown("### 👁️ 2. Vista Previa Directa en Pantalla")
     
     nombres_archivos = [a.name for a in archivos_subidos]
-    archivo_sel = st.selectbox("Selecciona un archivo para previsualizar antes de registrar:", nombres_archivos)
+    archivo_sel = st.selectbox("Selecciona un archivo para ver su contenido antes de registrar:", nombres_archivos)
     
     archivo_obj = next((f for f in archivos_subidos if f.name == archivo_sel), None)
     
@@ -44,24 +45,28 @@ if archivos_subidos:
         ext = archivo_obj.name.split('.')[-1].lower()
         
         if ext == 'pdf':
-            st.info(f"📄 Archivo PDF seleccionado: **{archivo_obj.name}** ({round(archivo_obj.size / 1024, 2)} KB)")
-            st.markdown("*(Los navegadores bloquean visores directos por seguridad. Puedes descargar o verificar el archivo de forma segura abajo)*")
-            
-            # Botón nativo seguro para descargar/ver el PDF sin que Chrome lo bloquee
-            st.download_button(
-                label=f"🔍 Abrir / Descargar Vista Previa de {archivo_obj.name}",
-                data=archivo_obj.getvalue(),
-                file_name=archivo_obj.name,
-                mime="application/pdf",
-                key=f"preview_pdf_{archivo_obj.name}"
-            )
-            
+            try:
+                # Leemos los bytes del PDF subido
+                bytes_pdf = archivo_obj.read()
+                base64_pdf = base64.b64encode(bytes_pdf).decode('utf-8')
+                
+                # Usamos un visor seguro embebido con parámetros que evitan el bloqueo de Chrome
+                pdf_html = f'<iframe src="data:application/pdf;base64,{base64_pdf}#view=FitH" width="100%" height="600px" style="border: none;"></iframe>'
+                st.markdown(pdf_html, unsafe_allow_html=True)
+                
+                # Restauramos el puntero del archivo para que no falle al registrarse después
+                archivo_obj.seek(0)
+            except Exception as e:
+                st.error(f"No se pudo mostrar la vista previa del PDF: {e}")
+                
         elif ext in ['xlsx', 'xls']:
             try:
                 df_prev = pd.read_excel(archivo_obj)
-                st.dataframe(df_prev.head(25), use_container_width=True)
+                st.dataframe(df_prev.head(30), use_container_width=True)
+                archivo_obj.seek(0)
             except Exception as e:
                 st.error(f"Error al leer el Excel: {e}")
+                
         elif ext == 'csv':
             try:
                 archivo_obj.seek(0)
@@ -70,7 +75,8 @@ if archivos_subidos:
                 except:
                     archivo_obj.seek(0)
                     df_prev = pd.read_csv(archivo_obj, sep=',')
-                st.dataframe(df_prev.head(25), use_container_width=True)
+                st.dataframe(df_prev.head(30), use_container_width=True)
+                archivo_obj.seek(0)
             except Exception as e:
                 st.error(f"Error al leer el CSV: {e}")
 
@@ -148,4 +154,4 @@ if not st.session_state['df_registro_global'].empty:
         key="dl_excel_final"
     )
 else:
-    st.info("💡 Sube tus documentos arriba para validarlos y agregarlos al registro de control.")
+    st.info("💡 Sube tus documentos arriba para previsualizarlos en pantalla, validarlos y agregarlos al registro de control.")
