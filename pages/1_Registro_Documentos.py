@@ -1,20 +1,20 @@
 import streamlit as st
 import pandas as pd
 import io
+import base64
 
 st.set_page_config(
-    page_title="Registro de Documentos y PDFs",
+    page_title="Registro, Vista Previa y Gestión de Documentos",
     page_icon="📂",
     layout="wide"
 )
 
-st.title("📂 Registro y Control de Documentos (PDFs y Respaldos)")
+st.title("📂 Registro, Vista Previa y Gestión de Documentos")
 st.markdown("""
-En esta página puedes subir tus archivos PDF, facturas o planillas de respaldo. 
-Los archivos se irán **acumulando y registrando en la lista** para que lleves un control ordenado de tu documentación.
+Sube tus documentos, revísalos en la vista previa, regístralos de forma segura y **elimina cualquier registro** si cometiste un error.
 """)
 
-# 1. Inicializar la memoria (session_state) para que el registro no se borre
+# 1. Inicializar la memoria (session_state) para el historial acumulativo
 if 'df_registro_global' not in st.session_state:
     st.session_state['df_registro_global'] = pd.DataFrame(columns=[
         'Nombre de Archivo', 'Tipo', 'Tamaño (KB)', 'Estado'
@@ -22,66 +22,132 @@ if 'df_registro_global' not in st.session_state:
 
 # 2. Contenedor para la subida de archivos
 with st.container(border=True):
-    st.markdown("### 📥 Subir Nuevos Documentos (PDF, Excel, CSV)")
-    archivos_nuevos = st.file_uploader(
-        "Selecciona uno o varios archivos de respaldo:",
+    st.markdown("### 📥 1. Carga de Archivos")
+    archivos_subidos = st.file_uploader(
+        "Selecciona uno o varios archivos (PDF, Excel, CSV):",
         type=["pdf", "xlsx", "xls", "csv"],
         accept_multiple_files=True,
-        key="uploader_pdf_page"
+        key="uploader_con_previsualizacion"
     )
 
-    if archivos_nuevos:
-        if st.button("➕ Registrar Archivos en el Sistema", type="primary"):
-            nuevos_datos = []
-            for archivo in archivos_nuevos:
-                nombre = archivo.name
-                extension = nombre.split('.')[-1].upper()
-                tamanio_kb = round(archivo.size / 1024, 2)
+# 3. ZONA DE VISTA PREVIA (Para validar antes de registrar)
+if archivos_subidos:
+    st.divider()
+    st.markdown("### 👁️ 2. Vista Previa (Revisa antes de registrar)")
+    
+    nombres_archivos = [archivo.name for archivo in archivos_subidos]
+    archivo_seleccionado_nombre = st.selectbox("Selecciona un archivo para previsualizar:", nombres_archivos)
+    
+    archivo_obj = next((f for f in archivos_subidos if f.name == archivo_seleccionado_nombre), None)
+    
+    if archivo_obj:
+        ext = archivo_obj.name.split('.')[-1].lower()
+        
+        if ext == 'pdf':
+            try:
+                base64_pdf = base64.b64encode(archivo_obj.read()).decode('utf-8')
+                pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="500px" type="application/pdf"></iframe>'
+                st.markdown(pdf_display, unsafe_allow_html=True)
+            except Exception as e:
+                st.error(f"No se pudo renderizar la vista previa del PDF: {str(e)}")
                 
-                nuevos_datos.append({
-                    'Nombre de Archivo': nombre,
-                    'Tipo': extension,
-                    'Tamaño (KB)': tamanio_kb,
-                    'Estado': 'Registrado y Disponible'
-                })
-            
-            df_nuevo = pd.DataFrame(nuevos_datos)
-            
-            # Combinamos con lo que ya estaba registrado previamente en la sesión
-            st.session_state['df_registro_global'] = pd.concat(
-                [st.session_state['df_registro_global'], df_nuevo]
-            ).drop_duplicates(subset=['Nombre de Archivo'], keep='last')
-            
-            st.success(f"✨ ¡Se han registrado **{len(archivos_nuevos)}** archivos nuevos exitosamente!")
+        elif ext in ['xlsx', 'xls']:
+            try:
+                df_preview = pd.read_excel(archivo_obj)
+                st.dataframe(df_preview.head(30), use_container_width=True)
+            except Exception as e:
+                st.error(f"Error al leer el Excel: {str(e)}")
+                
+        elif ext == 'csv':
+            try:
+                archivo_obj.seek(0)
+                try:
+                    df_preview = pd.read_csv(archivo_obj, sep=';')
+                except:
+                    archivo_obj.seek(0)
+                    df_preview = pd.read_csv(archivo_obj, sep=',')
+                st.dataframe(df_preview.head(30), use_container_width=True)
+            except Exception as e:
+                st.error(f"Error al leer el CSV: {str(e)}")
 
-# 3. Mostrar la tabla con el registro acumulado
+    st.divider()
+
+    # 4. BOTÓN DE CONFIRMACIÓN Y REGISTRO
+    st.markdown("### ✅ 3. Confirmar y Registrar")
+    if st.button("➕ Confirmar y Registrar Archivos", type="primary", use_container_width=True):
+        nuevos_datos = []
+        for archivo in archivos_subidos:
+            nombre = archivo.name
+            extension = nombre.split('.')[-1].upper()
+            tamanio_kb = round(archivo.size / 1024, 2)
+            
+            nuevos_datos.append({
+                'Nombre de Archivo': nombre,
+                'Tipo': extension,
+                'Tamaño (KB)': tamanio_kb,
+                'Estado': 'Registrado y Validado'
+            })
+        
+        df_nuevo = pd.DataFrame(nuevos_datos)
+        
+        st.session_state['df_registro_global'] = pd.concat(
+            [st.session_state['df_registro_global'], df_nuevo]
+        ).drop_duplicates(subset=['Nombre de Archivo'], keep='last')
+        
+        st.success(f"✨ ¡Se han registrado **{len(archivos_subidos)}** archivos oficialmente en el sistema!")
+
+# 5. HISTORIAL CONSOLIDADO Y OPCIONES DE GESTIÓN (BORRAR / DESCARGAR)
 if not st.session_state['df_registro_global'].empty:
     st.divider()
-    st.subheader("📋 Historial de Documentos Registrados")
-    st.markdown(f"Total de documentos en registro: **{len(st.session_state['df_registro_global'])}**")
+    st.subheader("📋 Historial Consolidado de Documentos Registrados")
+    st.markdown(f"Total de documentos en el registro: **{len(st.session_state['df_registro_global'])}**")
     
-    # Tabla interactiva
     st.dataframe(st.session_state['df_registro_global'], use_container_width=True)
     
-    col1, col2 = st.columns(2)
-    with col1:
-        # Botón para descargar el registro completo en Excel
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            st.session_state['df_registro_global'].to_excel(writer, sheet_name='Registro_Documentos', index=False)
+    # --- NUEVA SECCIÓN: ELIMINAR REGISTROS ESPECÍFICOS ---
+    with st.expander("🗑️ Opciones de Borrado (Eliminar archivos del historial)"):
+        archivos_en_historial = st.session_state['df_registro_global']['Nombre de Archivo'].tolist()
         
-        st.download_button(
-            label="📥 Descargar Registro Completo en Excel",
-            data=output.getvalue(),
-            file_name="Registro_Documentos_Cruce.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="dl_registro"
+        archivos_a_borrar = st.multiselect(
+            "Selecciona los archivos que deseas eliminar del registro:",
+            options=archivos_en_historial,
+            key="selector_borrar_archivos"
         )
-    with col2:
-        if st.button("🗑️ Limpiar / Reiniciar Registro"):
-            st.session_state['df_registro_global'] = pd.DataFrame(columns=[
-                'Nombre de Archivo', 'Tipo', 'Tamaño (KB)', 'Estado'
-            ])
-            st.rerun()
+        
+        col_b1, col_b2 = st.columns(2)
+        with col_b1:
+            if st.button("❌ Eliminar Archivos Seleccionados", type="primary"):
+                if archivos_a_borrar:
+                    # Filtramos el DataFrame para conservar solo los que NO están en la lista de borrado
+                    st.session_state['df_registro_global'] = st.session_state['df_registro_global'][
+                        ~st.session_state['df_registro_global']['Nombre de Archivo'].isin(archivos_a_borrar)
+                    ]
+                    st.success(f"🗑️ Se han eliminado {len(archivos_a_borrar)} archivos del registro correctamente.")
+                    st.rerun()
+                else:
+                    st.warning("⚠️ No has seleccionado ningún archivo para borrar.")
+        with col_b2:
+            if st.button("⚠️ Borrar Todo el Historial"):
+                st.session_state['df_registro_global'] = pd.DataFrame(columns=[
+                    'Nombre de Archivo', 'Tipo', 'Tamaño (KB)', 'Estado'
+                ])
+                st.success("🧹 El historial ha sido reiniciado por completo.")
+                st.rerun()
+
+    st.divider()
+    
+    # Botón de Descarga General
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        st.session_state['df_registro_global'].to_excel(writer, sheet_name='Registro_Documentos', index=False)
+    
+    st.download_button(
+        label="📥 Descargar Registro Consolidado en Excel",
+        data=output.getvalue(),
+        file_name="Registro_Documentos_Cruce.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        type="secondary",
+        key="dl_registro_global_btn"
+    )
 else:
-    st.info("💡 Aún no hay documentos registrados. Sube tus PDFs o planillas arriba y haz clic en registrar.")
+    st.info("💡 Sube tus documentos arriba para revisarlos en la vista previa y agregarlos al registro.")
