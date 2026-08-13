@@ -6,24 +6,27 @@ import pdfplumber
 import re
 
 st.set_page_config(
-    page_title="Gestión, Lectura y Registro de Documentos",
+    page_title="Gestión y Registro de Facturas",
     page_icon="📂",
     layout="wide"
 )
 
-st.title("📂 Extracción Inteligente y Registro de Documentos (PDF, Excel, CSV)")
+st.title("📂 Extracción Automática y Registro de Documentos Tributarios")
 st.markdown("""
-Sube tus documentos de respaldo. El sistema analizará los bloques estructurados de la factura electrónica para extraer con precisión 
-la **Fecha de Emisión, RUT, N° Documento, Monto e IVA**.
+Sube tus documentos PDF. El sistema analizará los bloques de la factura para extraer con precisión:
+**Nombre Emisor, RUT Emisor, Número de Documento, Nombre Deudor, RUT Deudor, Fecha de Emisión, Monto Neto, I.V.A 19% y Total**.
 """)
 
-# Inicializar memoria de sesión con las columnas requeridas
-if 'df_registro_global' not in st.session_state:
-    st.session_state['df_registro_global'] = pd.DataFrame(columns=[
-        'SELECCIONAR', 'ID', 'NOMBRE DE ARCHIVO', 'FECHA EMISIÓN', 'RUT', 'N° DOCUMENTO', 'MONTO', 'IVA', 'TIPO', 'TAMAÑO', 'ESTADO'
-    ])
+# Columnas exactas solicitadas
+columnas_backend = [
+    'SELECCIONAR', 'ID', 'NOMBRE EMISOR', 'RUT EMISOR', 'NUMERO DE DOCUMENTO', 
+    'NOMBRE DEUDOR', 'RUT DEUDOR', 'FECHA DE EMISION', 'MONTO NETO', 'I.V.A 19%', 'TOTAL', 'ESTADO'
+]
 
-# Función avanzada de extracción basada en los bloques de documentos tributarios (DTE)
+if 'df_registro_global' not in st.session_state:
+    st.session_state['df_registro_global'] = pd.DataFrame(columns=columnas_backend)
+
+# Función avanzada de extracción basada en los bloques de DTE
 def extraer_datos_pdf(archivo_pdf):
     lineas_texto = []
     texto_completo = ""
@@ -42,197 +45,162 @@ def extraer_datos_pdf(archivo_pdf):
     except Exception as e:
         print(f"Error leyendo PDF: {e}")
 
-    # 1. Extracción de RUT (Busca patrones de RUT chileno en todo el documento)
-    rut_encontrado = "No Detectado"
-    # Patrón estándar para RUT chileno (ej: 76.123.456-7 o 12345678-9)
-    matches_rut = re.findall(r'\b(\d{1,2}\.\d{3}\.\d{3}-[0-9kK]|\d{7,8}-[0-9kK])\b', texto_completo)
-    if matches_rut:
-        # Por lo general, el primer RUT que aparece en la cabecera es el del emisor del documento
-        rut_encontrado = matches_rut[0]
-
-    # 2. Extracción de Fecha de Emisión (Bloque de cabecera)
-    fecha_encontrada = "No Detectada"
-    for i, linea in enumerate(lineas_texto):
-        if re.search(r'emisi[oó]n|fecha', linea, re.IGNORECASE):
-            # Busca en la misma línea o en la línea siguiente
-            match_f = re.search(r'\b(\d{2}[-/]\d{2}[-/]\d{4})\b', linea)
-            if match_f:
-                fecha_encontrada = match_f.group(1)
+    # 1. Nombre Emisor (suele estar en las primeras líneas)
+    nombre_emisor = "No Detectado"
+    for linea in lineas_texto[:6]:
+        if "SPA" in linea.upper() or "LTDA" in linea.upper() or "S.A." in linea.upper():
+            nombre_emisor = linea
+            break
+    if nombre_emisor == "No Detectado" and len(lineas_texto) > 1:
+        for l in lineas_texto[1:5]:
+            if len(l) > 3 and "GIRO" not in l.upper() and "HUERTO" not in l.upper():
+                nombre_emisor = l
                 break
-            elif i + 1 < len(lineas_texto):
-                match_f_next = re.search(r'\b(\d{2}[-/]\d{2}[-/]\d{4})\b', lineas_texto[i+1])
-                if match_f_next:
-                    fecha_encontrada = match_f_next.group(1)
-                    break
-    if fecha_encontrada == "No Detectada":
-        match_gen_f = re.search(r'\b(\d{2}[-/]\d{2}[-/]\d{4})\b', texto_completo)
-        if match_gen_f:
-            fecha_encontrada = match_gen_f.group(1)
 
-    # 3. Extracción de N° Documento / Folio (Bloque superior derecho o etiquetas)
-    folio_encontrado = "S/F"
-    for i, linea in enumerate(lineas_texto):
-        if re.search(r'n[oº°]\s*(?:de\s*)?folio|folio|n[oº°]\s*d[oé]c|factura|boleta', linea, re.IGNORECASE):
-            match_fol = re.search(r'(?:folio|n[oº°]\s*d[oé]c|factura|boleta)[\s.:#]*(\d+)', linea, re.IGNORECASE)
-            if match_fol:
-                folio_encontrado = match_fol.group(1)
+    # 2. RUTs (Emisor y Deudor)
+    ruts_encontrados = re.findall(r'\b(\d{1,2}\.\d{3}\.\d{3}-[0-9kK]|\d{7,8}-[0-9kK])\b', texto_completo)
+    rut_emisor = ruts_encontrados[0] if len(ruts_encontrados) > 0 else "No Detectado"
+    rut_deudor = ruts_encontrados[1] if len(ruts_encontrados) > 1 else "No Detectado"
+
+    # 3. Número de Documento (Folio)
+    num_doc = "S/F"
+    match_folio = re.search(r'(?:N[º°]|Nº)\s*(\d+)', texto_completo, re.IGNORECASE)
+    if match_folio:
+        num_doc = match_folio.group(1)
+    else:
+        match_alt_folio = re.search(r'FACTURA\s+ELECTRONICA.*?N[º°]?\s*(\d+)', texto_completo, re.DOTALL | re.IGNORECASE)
+        if match_alt_folio:
+            num_doc = match_alt_folio.group(1)
+
+    # 4. Nombre Deudor (Señor(es))
+    nombre_deudor = "No Detectado"
+    capturando_deudor = False
+    deudor_linhas = []
+    for linea in lineas_texto:
+        if "SEÑOR(ES):" in linea.upper() or "SEÑOR(ES)" in linea.upper():
+            capturando_deudor = True
+            partes = re.split(r'SEÑOR\(ES\):?', linea, flags=re.IGNORECASE)
+            if len(partes) > 1 and partes[1].strip():
+                deudor_linhas.append(partes[1].strip())
+            continue
+        if capturando_deudor:
+            if "R.U.T.:" in linea.upper() or "GIRO:" in linea.upper():
                 break
-            elif i + 1 < len(lineas_texto):
-                match_fol_next = re.search(r'(\d{1,10})', lineas_texto[i+1])
-                if match_fol_next:
-                    folio_encontrado = match_fol_next.group(1)
-                    break
+            if linea:
+                deudor_linhas.append(linea)
+    if deudor_linhas:
+        nombre_deudor = " ".join(deudor_linhas).strip()
 
-    # 4. Extracción de IVA (Bloque de Totales)
-    iva_encontrado = "0"
-    for i, linea in enumerate(lineas_texto):
-        if re.search(r'\biva\b', linea, re.IGNORECASE):
-            # Extrae todos los números con formato de moneda en esa línea o la siguiente
-            numeros_iva = re.findall(r'([\d{1,3}(?:\.\d{3})*]+)', linea)
-            if numeros_iva:
-                iva_encontrado = numeros_iva[-1]
-                break
-            elif i + 1 < len(lineas_texto):
-                numeros_iva_next = re.findall(r'([\d{1,3}(?:\.\d{3})*]+)', lineas_texto[i+1])
-                if numeros_iva_next:
-                    iva_encontrado = numeros_iva_next[-1]
-                    break
+    # 5. Fecha de Emisión
+    fecha_emision = "No Detectada"
+    match_fecha = re.search(r'Fecha\s*Emision[:\s]*([^\n]+)', texto_completo, re.IGNORECASE)
+    if match_fecha:
+        fecha_emision = match_fecha.group(1).strip()
+    else:
+        match_f_alt = re.search(r'\b(\d{2}[-/]\d{2}[-/]\d{4})\b', texto_completo)
+        if match_f_alt:
+            fecha_emision = match_f_alt.group(1)
 
-    # 5. Extracción de Monto Total (Bloque de Totales / Total a Pagar)
-    monto_encontrado = "0"
-    for i, linea in enumerate(lineas_texto):
-        if re.search(r'total\s*(?:a\s*pago|monto)?', linea, re.IGNORECASE):
-            numeros_monto = re.findall(r'([\d{1,3}(?:\.\d{3})*]+)', linea)
-            if numeros_monto:
-                monto_encontrado = numeros_monto[-1]
-                break
-            elif i + 1 < len(lineas_texto):
-                numeros_monto_next = re.findall(r'([\d{1,3}(?:\.\d{3})*]+)', lineas_texto[i+1])
-                if numeros_monto_next:
-                    monto_encontrado = numeros_monto_next[-1]
-                    break
+    # 6. Monto Neto, IVA y Total
+    monto_neto = "0"
+    iva_19 = "0"
+    total = "0"
 
-    # Respaldo financiero si el monto no fue capturado por etiqueta
-    if monto_encontrado == "0" or monto_encontrado == "":
-        todos_los_montos = re.findall(r'\$\s*([\d{1,3}(?:\.\d{3})*]+)', texto_completo)
-        if todos_los_montos:
-            monto_encontrado = todos_los_montos[-1]
+    match_neto = re.search(r'MONTO\s*NETO\s*\$?\s*([\d\.]+)', texto_completo, re.IGNORECASE)
+    if match_neto:
+        monto_neto = match_neto.group(1)
+
+    match_iva = re.search(r'I\.V\.A\.\s*19%\s*\$?\s*([\d\.]+)', texto_completo, re.IGNORECASE)
+    if match_iva:
+        iva_19 = match_iva.group(1)
+
+    match_total = re.search(r'TOTAL\s*\$?\s*([\d\.]+)', texto_completo, re.IGNORECASE)
+    if match_total:
+        total = match_total.group(1)
 
     return {
-        'FECHA EMISIÓN': fecha_encontrada,
-        'RUT': rut_encontrado,
-        'N° DOCUMENTO': folio_encontrado,
-        'MONTO': monto_encontrado,
-        'IVA': iva_encontrado
+        'NOMBRE EMISOR': nombre_emisor,
+        'RUT EMISOR': rut_emisor,
+        'NUMERO DE DOCUMENTO': num_doc,
+        'NOMBRE DEUDOR': nombre_deudor,
+        'RUT DEUDOR': rut_deudor,
+        'FECHA DE EMISION': fecha_emision,
+        'MONTO NETO': monto_neto,
+        'I.V.A 19%': iva_19,
+        'TOTAL': total
     }
 
 # 1. Carga de Archivos
 with st.container(border=True):
-    st.markdown("### 📥 1. Cargar Archivo(s) de Respaldo")
+    st.markdown("### 📥 Cargar Facturas o Documentos PDF")
     archivos_subidos = st.file_uploader(
-        "Selecciona uno o varios archivos (PDF, Excel, CSV):",
+        "Selecciona tus archivos PDF de respaldo:",
         type=["pdf", "xlsx", "xls", "csv"],
         accept_multiple_files=True,
-        key="uploader_principal"
+        key="uploader_dte"
     )
 
-# 2. Vista Previa Directa y Extracción de Datos
 if archivos_subidos:
     st.divider()
-    st.markdown("### 👁️ 2. Vista Previa y Análisis de Bloques Estructurados")
+    st.markdown("### 👁️ Vista Previa y Datos Extraídos")
+    nombres = [a.name for a in archivos_subidos]
+    sel = st.selectbox("Selecciona archivo para revisar:", nombres)
     
-    nombres_archivos = [a.name for a in archivos_subidos]
-    archivo_sel = st.selectbox("Selecciona un archivo para previsualizar y revisar los datos extraídos:", nombres_archivos)
+    obj = next((f for f in archivos_subidos if f.name == sel), None)
     
-    archivo_obj = next((f for f in archivos_subidos if f.name == archivo_sel), None)
-    
-    if archivo_obj:
-        ext = archivo_obj.name.split('.')[-1].lower()
+    if obj:
+        ext = obj.name.split('.')[-1].lower()
+        c1, c2 = st.columns(2)
         
-        col_v1, col_v2 = st.columns([1, 1])
-        
-        with col_v1:
-            st.markdown("#### 📄 Vista Previa Visual")
+        with c1:
+            st.markdown("#### Vista Previa Visual")
             if ext == 'pdf':
                 try:
-                    bytes_pdf = archivo_obj.read()
-                    doc = fitz.open(stream=bytes_pdf, filetype="pdf")
+                    doc = fitz.open(stream=obj.read(), filetype="pdf")
                     if len(doc) > 0:
-                        pix = doc[0].get_pixmap(dpi=120)
-                        st.image(pix.tobytes("png"), caption=f"Página 1 de {len(doc)}", use_container_width=True)
-                    archivo_obj.seek(0)
+                        st.image(doc[0].get_pixmap(dpi=120).tobytes("png"), use_container_width=True)
+                    obj.seek(0)
                 except Exception as e:
-                    st.error(f"Error al mostrar imagen del PDF: {e}")
-            elif ext in ['xlsx', 'xls']:
-                try:
-                    df_prev = pd.read_excel(archivo_obj)
-                    st.dataframe(df_prev.head(15), use_container_width=True)
-                    archivo_obj.seek(0)
-                except Exception as e:
-                    st.error(f"Error al leer Excel: {e}")
-            elif ext == 'csv':
-                try:
-                    archivo_obj.seek(0)
-                    try:
-                        df_prev = pd.read_csv(archivo_obj, sep=';')
-                    except:
-                        archivo_obj.seek(0)
-                        df_prev = pd.read_csv(archivo_obj, sep=',')
-                    st.dataframe(df_prev.head(15), use_container_width=True)
-                    archivo_obj.seek(0)
-                except Exception as e:
-                    st.error(f"Error al leer CSV: {e}")
-
-        with col_v2:
-            st.markdown("#### 🔍 Datos Estructurados Detectados")
+                    st.error(f"Error al previsualizar PDF: {e}")
+        
+        with c2:
+            st.markdown("#### Datos Detectados")
             if ext == 'pdf':
-                archivo_obj.seek(0)
-                datos_extraidos = extraer_datos_pdf(archivo_obj)
-                archivo_obj.seek(0)
+                obj.seek(0)
+                datos = extraer_datos_pdf(obj)
+                obj.seek(0)
                 
-                st.info("💡 Lectura basada en bloques de cabecera y totales:")
-                st.metric("📅 Fecha de Emisión", datos_extraidos['FECHA EMISIÓN'])
-                st.metric("🏢 RUT Identificado", datos_extraidos['RUT'])
-                st.metric("📄 N° de Documento / Folio", datos_extraidos['N° DOCUMENTO'])
-                st.metric("💰 Monto Total", f"$ {datos_extraidos['MONTO']}")
-                st.metric("📊 IVA Extraído", f"$ {datos_extraidos['IVA']}")
-            else:
-                st.success("✅ Archivo tabular (Excel/CSV) listo para ser incorporado al registro de control.")
+                st.write(f"🏢 **Emisor:** {datos['NOMBRE EMISOR']}")
+                st.write(f"🆔 **RUT Emisor:** {datos['RUT EMISOR']}")
+                st.write(f"📄 **N° Documento:** {datos['NUMERO DE DOCUMENTO']}")
+                st.write(f"👤 **Deudor:** {datos['NOMBRE DEUDOR']}")
+                st.write(f"🆔 **RUT Deudor:** {datos['RUT DEUDOR']}")
+                st.write(f"📅 **Fecha Emisión:** {datos['FECHA DE EMISION']}")
+                st.write(f"💵 **Neto:** $ {datos['MONTO NETO']}")
+                st.write(f"📊 **IVA 19%:** $ {datos['I.V.A 19%']}")
+                st.write(f"💳 **Total:** $ {datos['TOTAL']}")
 
     st.divider()
-    
-    # Botón para confirmar y registrar oficialmente los archivos validados
-    if st.button("➕ Confirmar y Registrar Archivos Validados", type="primary", use_container_width=True):
+    if st.button("➕ Confirmar y Registrar en la Planilla", type="primary", use_container_width=True):
         nuevos = []
         for arc in archivos_subidos:
-            if arc.name not in st.session_state['df_registro_global']['NOMBRE DE ARCHIVO'].values:
-                if arc.name.lower().endswith('.pdf'):
-                    arc.seek(0)
-                    d = extraer_datos_pdf(arc)
-                    arc.seek(0)
-                    f_val = d['FECHA EMISIÓN']
-                    rut_val = d['RUT']
-                    doc_val = d['N° DOCUMENTO']
-                    monto_val = d['MONTO']
-                    iva_val = d['IVA']
-                else:
-                    f_val = "N/A"
-                    rut_val = "N/A"
-                    doc_val = "N/A"
-                    monto_val = "Ver Excel"
-                    iva_val = "N/A"
-
+            if arc.name not in st.session_state['df_registro_global']['NOMBRE EMISOR'].values and arc.name.lower().endswith('.pdf'):
+                arc.seek(0)
+                d = extraer_datos_pdf(arc)
+                arc.seek(0)
+                
                 nuevos.append({
                     'SELECCIONAR': False,
                     'ID': f"{arc.name}_{arc.size}",
-                    'NOMBRE DE ARCHIVO': arc.name,
-                    'FECHA EMISIÓN': f_val,
-                    'RUT': rut_val,
-                    'N° DOCUMENTO': doc_val,
-                    'MONTO': monto_val,
-                    'IVA': iva_val,
-                    'TIPO': arc.name.split('.')[-1].upper(),
-                    'TAMAÑO': round(arc.size / 1024, 2),
+                    'NOMBRE EMISOR': d['NOMBRE EMISOR'],
+                    'RUT EMISOR': d['RUT EMISOR'],
+                    'NUMERO DE DOCUMENTO': d['NUMERO DE DOCUMENTO'],
+                    'NOMBRE DEUDOR': d['NOMBRE DEUDOR'],
+                    'RUT DEUDOR': d['RUT DEUDOR'],
+                    'FECHA DE EMISION': d['FECHA DE EMISION'],
+                    'MONTO NETO': d['MONTO NETO'],
+                    'I.V.A 19%': d['I.V.A 19%'],
+                    'TOTAL': d['TOTAL'],
                     'ESTADO': 'Registrado y Validado'
                 })
         
@@ -241,85 +209,68 @@ if archivos_subidos:
             st.session_state['df_registro_global'] = pd.concat(
                 [st.session_state['df_registro_global'], df_nuevo], ignore_index=True
             )
-            st.success(f"✅ ¡Se han registrado {len(nuevos)} archivos correctamente con sus bloques extraídos!")
+            st.success(f"✅ ¡Se han registrado {len(nuevos)} documentos con la estructura solicitada!")
             st.rerun()
         else:
-            st.warning("⚠️ Todos los archivos seleccionados ya se encontraban registrados previamente.")
+            st.warning("⚠️ Los documentos seleccionados ya están registrados.")
 
-# 3. Historial Consolidado con Tabla Interactiva y Reordenamiento
+# Tabla Principal Consolidada
 if not st.session_state['df_registro_global'].empty:
     st.divider()
-    st.subheader("📋 Historial Consolidado de Documentos Registrados")
-    st.markdown("Marca la casilla (**`SELECCIONAR`**) en la tabla de abajo de los documentos que deseas eliminar y haz clic en el botón de borrado:")
+    st.subheader("📋 Planilla Consolidada de Registro")
     
-    columnas_a_ocultar = ['NOMBRE DE ARCHIVO', 'TIPO', 'TAMAÑO', 'ID']
-    df_vista = st.session_state['df_registro_global'].drop(columns=columnas_a_ocultar, errors='ignore')
+    df_vista = st.session_state['df_registro_global'].drop(columns=['ID'], errors='ignore')
     
-    columnas_intermedias = [col for col in df_vista.columns if col not in ['SELECCIONAR', 'ESTADO']]
-    nuevo_orden = []
-    if 'SELECCIONAR' in df_vista.columns:
-        nuevo_orden.append('SELECCIONAR')
-    nuevo_orden.extend(columnas_intermedias)
-    if 'ESTADO' in df_vista.columns:
-        nuevo_orden.append('ESTADO')
-    
-    df_vista = df_vista[nuevo_orden]
+    cols_intermedias = [c for c in df_vista.columns if c not in ['SELECCIONAR', 'ESTADO']]
+    orden_final = ['SELECCIONAR'] + cols_intermedias + ['ESTADO']
+    df_vista = df_vista[orden_final]
     
     df_editado = st.data_editor(
         df_vista,
         column_config={
-            "SELECCIONAR": st.column_config.CheckboxColumn(
-                "🗑️ Seleccionar",
-                help="Marca para eliminar este registro",
-                default=False,
-            )
+            "SELECCIONAR": st.column_config.CheckboxColumn("🗑️ Seleccionar", default=False)
         },
-        disabled=columnas_intermedias,
+        disabled=cols_intermedias,
         hide_index=True,
         use_container_width=True,
         num_rows="fixed",
-        key="editor_tabla_registros"
+        key="tabla_maestra_dte"
     )
     
     if len(df_editado) == len(st.session_state['df_registro_global']):
         st.session_state['df_registro_global']['SELECCIONAR'] = df_editado['SELECCIONAR']
 
-    col_b1, col_b2 = st.columns(2)
-    with col_b1:
-        if st.button("❌ Eliminar Filas Marcadas con Check", type="primary"):
-            filas_a_mantener = st.session_state['df_registro_global'][st.session_state['df_registro_global']['SELECCIONAR'] == False]
-            cant_a_borrar = len(st.session_state['df_registro_global']) - len(filas_a_mantener)
-            
-            if cant_a_borrar > 0:
-                st.session_state['df_registro_global'] = filas_a_mantener
-                st.success(f"🗑️ Se han eliminado {cant_a_borrar} registros seleccionados.")
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("❌ Eliminar Filas Seleccionadas", type="primary"):
+            mantener = st.session_state['df_registro_global'][st.session_state['df_registro_global']['SELECCIONAR'] == False]
+            borrados = len(st.session_state['df_registro_global']) - len(mantener)
+            if borrados > 0:
+                st.session_state['df_registro_global'] = mantener
+                st.success(f"🗑️ Se eliminaron {borrados} registros.")
                 st.rerun()
             else:
-                st.warning("⚠️ No has marcado ninguna casilla en la columna 'SELECCIONAR' de la tabla.")
-                
-    with col_b2:
-        if st.button("⚠️ Vaciar Todo el Historial"):
-            st.session_state['df_registro_global'] = pd.DataFrame(columns=[
-                'SELECCIONAR', 'ID', 'NOMBRE DE ARCHIVO', 'FECHA EMISIÓN', 'RUT', 'N° DOCUMENTO', 'MONTO', 'IVA', 'TIPO', 'TAMAÑO', 'ESTADO'
-            ])
-            st.success("🧹 Historial vaciado por completo.")
+                st.warning("Selecciona al menos una casilla.")
+    with col2:
+        if st.button("⚠️ Vaciar Todo"):
+            st.session_state['df_registro_global'] = pd.DataFrame(columns=columnas_backend)
+            st.success("Historial reiniciado.")
             st.rerun()
 
     st.divider()
-
-    df_exportar = st.session_state['df_registro_global'].drop(columns=['SELECCIONAR', 'ID'], errors='ignore')
     
+    df_excel = st.session_state['df_registro_global'].drop(columns=['SELECCIONAR', 'ID'], errors='ignore')
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df_exportar.to_excel(writer, sheet_name='Registro_Documentos', index=False)
+        df_excel.to_excel(writer, sheet_name='Registro_Facturas', index=False)
     
     st.download_button(
-        label="📥 Descargar Registro Consolidado en Excel",
+        label="📥 Descargar Planilla Consolidada en Excel",
         data=output.getvalue(),
-        file_name="Registro_Documentos_Cruce.xlsx",
+        file_name="Registro_Facturas_Consolidado.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         type="secondary",
-        key="dl_excel_final"
+        key="dl_excel_dte"
     )
 else:
-    st.info("💡 Sube tus documentos arriba para previsualizarlos, validar su análisis de bloques y agregarlos al registro de control.")
+    st.info("💡 Sube tus documentos PDF arriba para procesarlos y construir la planilla de registro.")
