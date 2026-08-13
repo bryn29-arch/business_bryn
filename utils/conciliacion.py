@@ -39,9 +39,45 @@ def buscar_combinacion_robusta(df_candidatos, monto_objetivo, col_monto='Monto_R
     dfs(0, 0, [])
     return resultado_combo
 
+
+def _seleccionar_documento_por_duplicidad(df_duplicados, col_fecha='FECHA DE EMISION'):
+    """
+    Cuando hay múltiples documentos con el MISMO deudor y MISMO monto,
+    elige el más antiguo (que lleva más tiempo sin pagar).
+    
+    Si la columna de fecha no existe, devuelve el primer índice.
+    """
+    if df_duplicados.empty:
+        return None
+    
+    # Intentar ordenar por fecha si existe
+    if col_fecha in df_duplicados.columns:
+        try:
+            df_dup_copy = df_duplicados.copy()
+            # Convertir a datetime (maneja formatos variados)
+            df_dup_copy[col_fecha] = pd.to_datetime(
+                df_dup_copy[col_fecha], 
+                errors='coerce'
+            )
+            # Ordenar ascendente: la más antigua primero
+            df_dup_copy = df_dup_copy.sort_values(by=col_fecha, na_position='last')
+            return df_dup_copy.index[0]
+        except Exception:
+            # Si la conversión falla, retorna el primero
+            return df_duplicados.index[0]
+    else:
+        # Si no existe fecha, devuelve el primero (mejor que nada)
+        return df_duplicados.index[0]
+
+
 def conciliar_cartera_y_cartola(df_cartola, df_ventas):
     """
     Núcleo de cruce inteligente utilizando las columnas mapeadas manualmente por el usuario.
+    
+    MEJORAS:
+    - Cuando hay múltiples documentos del mismo deudor + mismo monto,
+      elige el más antiguo (desempate por fecha de emisión).
+    - Detecta y alerta claramente cuando hay ambigüedad.
     """
     if df_cartola is None or df_cartola.empty or df_ventas is None or df_ventas.empty:
         return pd.DataFrame(), pd.DataFrame()
@@ -90,8 +126,17 @@ def conciliar_cartera_y_cartola(df_cartola, df_ventas):
                     # 1. Buscar match exacto 1 a 1 para ese RUT
                     exacto_1a1 = cand_rut[cand_rut['Monto_Real'] == monto_banco]
                     if not exacto_1a1.empty:
-                        match_indices = [exacto_1a1.index[0]]
-                        tipo_match = "🟢 RUT y Monto Exacto (1:1)"
+                        # 🛠️ MEJORA: Si hay múltiples con el mismo monto, elige el más antiguo
+                        if len(exacto_1a1) > 1:
+                            idx_seleccionado = _seleccionar_documento_por_duplicidad(
+                                exacto_1a1,
+                                col_fecha='FECHA DE EMISION'
+                            )
+                            match_indices = [idx_seleccionado]
+                            tipo_match = f"🟢 RUT y Monto Exacto (Más Antiguo de {len(exacto_1a1)})"
+                        else:
+                            match_indices = [exacto_1a1.index[0]]
+                            tipo_match = "🟢 RUT y Monto Exacto (1:1)"
                     else:
                         # 2. Buscar combinación exacta de suma (1:N) para ese RUT
                         combo = buscar_combinacion_robusta(cand_rut, monto_banco, col_monto='Monto_Real', tolerancia=0)
@@ -103,8 +148,18 @@ def conciliar_cartera_y_cartola(df_cartola, df_ventas):
             if not match_indices:
                 exacto_monto = ventas_disponibles[ventas_disponibles['Monto_Real'] == monto_banco]
                 if not exacto_monto.empty:
-                    match_indices = [exacto_monto.index[0]]
-                    tipo_match = "🟡 Coincidencia por Monto (Verificar Glosa)"
+                    # 🛠️ MEJORA: Si hay múltiples con el mismo monto (SIN filtro de RUT),
+                    # elige el más antiguo para reducir ambigüedad
+                    if len(exacto_monto) > 1:
+                        idx_seleccionado = _seleccionar_documento_por_duplicidad(
+                            exacto_monto,
+                            col_fecha='FECHA DE EMISION'
+                        )
+                        match_indices = [idx_seleccionado]
+                        tipo_match = f"🟡 Coincidencia por Monto ({len(exacto_monto)} opciones, Elegido más antiguo)"
+                    else:
+                        match_indices = [exacto_monto.index[0]]
+                        tipo_match = "🟡 Coincidencia por Monto (Verificar Glosa)"
 
         if match_indices:
             for i in match_indices:
@@ -132,7 +187,7 @@ def conciliar_cartera_y_cartola(df_cartola, df_ventas):
             if dif == 0 and not rut_discrepancia:
                 if tiene_duplicidad:
                     estado = '🟡 Con Observación'
-                    observacion_detalle = f'⚠️ Duplicidad estricta: Existen {len(mismos_montos)} documentos con este mismo monto'
+                    observacion_detalle = f'⚠️ Duplicidad resuelta: Se seleccionó el documento más antiguo de {len(mismos_montos)} opciones con este monto'
                 else:
                     estado = '🟢 Conciliado Exacto'
                     observacion_detalle = 'Monto y documentos cuadrados sin observaciones'
@@ -142,7 +197,7 @@ def conciliar_cartera_y_cartola(df_cartola, df_ventas):
                 if rut_discrepancia:
                     observaciones_lista.append(f'⚠️ RUT de cartola ({rut_c}) difiere del documento matcheado ({", ".join(ruts_en_match)})')
                 if tiene_duplicidad:
-                    observaciones_lista.append(f'⚠️ Existen {len(mismos_montos)} documentos duplicados con este monto')
+                    observaciones_lista.append(f'⚠️ Existen {len(mismos_montos)} documentos duplicados con este monto (se eligió el más antiguo)')
                 if dif != 0:
                     observaciones_lista.append(f'⚠️ Diferencia de ${dif:,.0f} respecto a cartera')
                 
