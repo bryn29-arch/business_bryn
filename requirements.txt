@@ -5,3 +5,4 @@ xlrd
 weasyprint
 pdfplumber
 pymupdf
+pip install pdfplumber PyMuPDF pdf2image pytesseract
