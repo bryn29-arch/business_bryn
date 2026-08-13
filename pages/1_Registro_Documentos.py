@@ -3,7 +3,6 @@ import re
 import fitz  # PyMuPDF para previsualización visual
 import pdfplumber
 import pandas as pd
-import pytesseract
 import streamlit as st
 
 st.set_page_config(
