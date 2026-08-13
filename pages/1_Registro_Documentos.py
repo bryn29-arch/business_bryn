@@ -13,14 +13,14 @@ st.set_page_config(
 
 st.title("📂 Extracción Inteligente y Registro de Documentos (PDF, Excel, CSV)")
 st.markdown("""
-Sube tus documentos de respaldo. El sistema **extraerá automáticamente los datos clave** y podrás gestionar la tabla 
-marcando con un **check** las filas que desees eliminar mediante el botón inferior.
+Sube tus documentos de respaldo. El sistema **extraerá automáticamente los datos clave** (Fecha, RUT, Folio, Monto e IVA) 
+desde el texto interno del PDF, y podrás **marcar con un check** las filas directamente en la tabla para eliminarlas si es necesario.
 """)
 
-# Inicializar memoria de sesión con todas las columnas necesarias
+# Inicializar memoria de sesión con la columna 'Seleccionar' para los checks
 if 'df_registro_global' not in st.session_state:
     st.session_state['df_registro_global'] = pd.DataFrame(columns=[
-        'SELECCIONAR', 'ID', 'NOMBRE DE ARCHIVO', 'FECHA', 'RUT', 'N° DOCUMENTO', 'MONTO', 'IVA', 'TIPO', 'TAMAÑO', 'ESTADO'
+        'Seleccionar', 'ID', 'Nombre de Archivo', 'Fecha', 'RUT', 'N° Documento', 'Monto', 'IVA', 'Tipo', 'Estado'
     ])
 
 # Función inteligente para extraer datos clave desde el texto de un PDF
@@ -51,10 +51,10 @@ def extraer_datos_pdf(archivo_pdf):
     iva_encontrado = iva_match.group(1) if iva_match else "0"
 
     return {
-        'FECHA': fecha_encontrada,
+        'Fecha': fecha_encontrada,
         'RUT': rut_encontrado,
-        'N° DOCUMENTO': folio_encontrado,
-        'MONTO': monto_encontrado,
+        'N° Documento': folio_encontrado,
+        'Monto': monto_encontrado,
         'IVA': iva_encontrado
     }
 
@@ -123,10 +123,10 @@ if archivos_subidos:
                 archivo_obj.seek(0)
                 
                 st.info("💡 Estos son los datos detectados automáticamente.")
-                st.metric("📅 Fecha Detectada", datos_extraidos['FECHA'])
+                st.metric("📅 Fecha Detectada", datos_extraidos['Fecha'])
                 st.metric("🏢 RUT Identificado", datos_extraidos['RUT'])
-                st.metric("📄 N° de Documento / Folio", datos_extraidos['N° DOCUMENTO'])
-                st.metric("💰 Monto Total", f"$ {datos_extraidos['MONTO']}")
+                st.metric("📄 N° de Documento / Folio", datos_extraidos['N° Documento'])
+                st.metric("💰 Monto Total", f"$ {datos_extraidos['Monto']}")
                 st.metric("📊 IVA Estimado", f"$ {datos_extraidos['IVA']}")
             else:
                 st.success("✅ Archivo tabular (Excel/CSV) listo para ser incorporado al registro de control.")
@@ -137,15 +137,15 @@ if archivos_subidos:
     if st.button("➕ Confirmar y Registrar Archivos Validados", type="primary", use_container_width=True):
         nuevos = []
         for arc in archivos_subidos:
-            if arc.name not in st.session_state['df_registro_global']['NOMBRE DE ARCHIVO'].values:
+            if arc.name not in st.session_state['df_registro_global']['Nombre de Archivo'].values:
                 if arc.name.lower().endswith('.pdf'):
                     arc.seek(0)
                     d = extraer_datos_pdf(arc)
                     arc.seek(0)
-                    f_val = d['FECHA']
+                    f_val = d['Fecha']
                     rut_val = d['RUT']
-                    doc_val = d['N° DOCUMENTO']
-                    monto_val = d['MONTO']
+                    doc_val = d['N° Documento']
+                    monto_val = d['Monto']
                     iva_val = d['IVA']
                 else:
                     f_val = "N/A"
@@ -155,17 +155,16 @@ if archivos_subidos:
                     iva_val = "N/A"
 
                 nuevos.append({
-                    'SELECCIONAR': False,
+                    'Seleccionar': False,
                     'ID': f"{arc.name}_{arc.size}",
-                    'NOMBRE DE ARCHIVO': arc.name,
-                    'FECHA': f_val,
+                    'Nombre de Archivo': arc.name,
+                    'Fecha': f_val,
                     'RUT': rut_val,
-                    'N° DOCUMENTO': doc_val,
-                    'MONTO': monto_val,
+                    'N° Documento': doc_val,
+                    'Monto': monto_val,
                     'IVA': iva_val,
-                    'TIPO': arc.name.split('.')[-1].upper(),
-                    'TAMAÑO': round(arc.size / 1024, 2),
-                    'ESTADO': 'Registrado y Validado'
+                    'Tipo': arc.name.split('.')[-1].upper(),
+                    'Estado': 'Registrado y Validado'
                 })
         
         if nuevos:
@@ -178,52 +177,37 @@ if archivos_subidos:
         else:
             st.warning("⚠️ Todos los archivos seleccionados ya se encontraban registrados previamente.")
 
-# 3. Historial Consolidado con Tabla Interactiva (Casillas Checkbox) y Reordenamiento
+# 3. Historial Consolidado con TablaInteractiva (Casillas Checkbox) y Descarga
 if not st.session_state['df_registro_global'].empty:
     st.divider()
     st.subheader("📋 Historial Consolidado de Documentos Registrados")
-    st.markdown("Marca la casilla (**`SELECCIONAR`**) en la tabla de abajo de los documentos que deseas eliminar y haz clic en el botón de borrado:")
+    st.markdown("Marca la casilla (**`Seleccionar`**) en la tabla de abajo de los documentos que deseas eliminar y haz clic en el botón de borrado:")
     
-    # Preparamos el DataFrame de vista ocultando metadatos innecesarios
-    columnas_a_ocultar = ['NOMBRE DE ARCHIVO', 'TIPO', 'TAMAÑO', 'ID']
-    df_vista = st.session_state['df_registro_global'].drop(columns=columnas_a_ocultar, errors='ignore')
-    
-    # Reorganizamos: 'SELECCIONAR' al principio, datos en medio y 'ESTADO' al final
-    columnas_intermedias = [col for col in df_vista.columns if col not in ['SELECCIONAR', 'ESTADO']]
-    nuevo_orden = []
-    if 'SELECCIONAR' in df_vista.columns:
-        nuevo_orden.append('SELECCIONAR')
-    nuevo_orden.extend(columnas_intermedias)
-    if 'ESTADO' in df_vista.columns:
-        nuevo_orden.append('ESTADO')
-    
-    df_vista = df_vista[nuevo_orden]
-    
-    # Tabla interactiva con checkboxes (num_rows="fixed" evita errores de tamaño al sincronizar)
+    # Tabla interactiva con checkboxes integrados en la primera columna
     df_editado = st.data_editor(
-        df_vista,
+        st.session_state['df_registro_global'],
         column_config={
-            "SELECCIONAR": st.column_config.CheckboxColumn(
+            "Seleccionar": st.column_config.CheckboxColumn(
                 "🗑️ Seleccionar",
                 help="Marca para eliminar este registro",
                 default=False,
-            )
+            ),
+            "ID": None  # Ocultamos la columna técnica ID
         },
-        disabled=columnas_intermedias,
+        disabled=["Nombre de Archivo", "Fecha", "RUT", "N° Documento", "Monto", "IVA", "Tipo", "Estado"],
         hide_index=True,
         use_container_width=True,
-        num_rows="fixed", 
         key="editor_tabla_registros"
     )
     
-    # Sincronizamos de vuelta el estado de los checkboxes marcados a la sesión principal con validación de tamaño
-    if len(df_editado) == len(st.session_state['df_registro_global']):
-        st.session_state['df_registro_global']['SELECCIONAR'] = df_editado['SELECCIONAR']
+    # Guardamos el estado de las casillas en la sesión
+    st.session_state['df_registro_global'] = df_editado
 
     col_b1, col_b2 = st.columns(2)
     with col_b1:
         if st.button("❌ Eliminar Filas Marcadas con Check", type="primary"):
-            filas_a_mantener = st.session_state['df_registro_global'][st.session_state['df_registro_global']['SELECCIONAR'] == False]
+            # Filtramos para conservar únicamente las filas donde 'Seleccionar' es False
+            filas_a_mantener = st.session_state['df_registro_global'][st.session_state['df_registro_global']['Seleccionar'] == False]
             cant_a_borrar = len(st.session_state['df_registro_global']) - len(filas_a_mantener)
             
             if cant_a_borrar > 0:
@@ -231,20 +215,20 @@ if not st.session_state['df_registro_global'].empty:
                 st.success(f"🗑️ Se han eliminado {cant_a_borrar} registros seleccionados.")
                 st.rerun()
             else:
-                st.warning("⚠️ No has marcado ninguna casilla en la columna 'SELECCIONAR' de la tabla.")
+                st.warning("⚠️ No has marcado ninguna casilla en la columna 'Seleccionar' de la tabla.")
                 
     with col_b2:
         if st.button("⚠️ Vaciar Todo el Historial"):
             st.session_state['df_registro_global'] = pd.DataFrame(columns=[
-                'SELECCIONAR', 'ID', 'NOMBRE DE ARCHIVO', 'FECHA', 'RUT', 'N° DOCUMENTO', 'MONTO', 'IVA', 'TIPO', 'TAMAÑO', 'ESTADO'
+                'Seleccionar', 'ID', 'Nombre de Archivo', 'Fecha', 'RUT', 'N° Documento', 'Monto', 'IVA', 'Tipo', 'Estado'
             ])
             st.success("🧹 Historial vaciado por completo.")
             st.rerun()
 
     st.divider()
 
-    # Preparamos el DataFrame limpio para exportar a Excel
-    df_exportar = st.session_state['df_registro_global'].drop(columns=['SELECCIONAR', 'ID'], errors='ignore')
+    # Preparamos el DataFrame limpio para exportar a Excel (sin columnas técnicas)
+    df_exportar = st.session_state['df_registro_global'].drop(columns=['Seleccionar', 'ID'], errors='ignore')
     
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -254,4 +238,9 @@ if not st.session_state['df_registro_global'].empty:
         label="📥 Descargar Registro Consolidado en Excel",
         data=output.getvalue(),
         file_name="Registro_Documentos_Cruce.xlsx",
-        mime="application/vnd.openxml
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        type="secondary",
+        key="dl_excel_final"
+    )
+else:
+    st.info("💡 Sube tus documentos arriba para previsualizarlos, ver su extracción de datos automática y agregarlos al registro de control.")
