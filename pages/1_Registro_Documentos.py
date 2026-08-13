@@ -14,10 +14,10 @@ st.set_page_config(
 st.title("📂 Extracción Inteligente y Registro de Documentos (PDF, Excel, CSV)")
 st.markdown("""
 Sube tus documentos de respaldo. El sistema **extraerá automáticamente los datos clave** y podrás gestionar la tabla 
-marcando con un **check** las filas que desees eliminar.
+marcando con un **check** las filas que desees eliminar mediante el botón inferior.
 """)
 
-# Inicializar memoria de sesión con todas las columnas necesarias (backend)
+# Inicializar memoria de sesión con todas las columnas necesarias
 if 'df_registro_global' not in st.session_state:
     st.session_state['df_registro_global'] = pd.DataFrame(columns=[
         'SELECCIONAR', 'ID', 'NOMBRE DE ARCHIVO', 'FECHA', 'RUT', 'N° DOCUMENTO', 'MONTO', 'IVA', 'TIPO', 'TAMAÑO', 'ESTADO'
@@ -184,7 +184,7 @@ if not st.session_state['df_registro_global'].empty:
     st.subheader("📋 Historial Consolidado de Documentos Registrados")
     st.markdown("Marca la casilla (**`SELECCIONAR`**) en la tabla de abajo de los documentos que deseas eliminar y haz clic en el botón de borrado:")
     
-    # Preparamos el DataFrame de vista ocultando metadatos innecesarios ('NOMBRE DE ARCHIVO', 'TIPO', 'TAMAÑO', 'ID')
+    # Preparamos el DataFrame de vista ocultando metadatos innecesarios
     columnas_a_ocultar = ['NOMBRE DE ARCHIVO', 'TIPO', 'TAMAÑO', 'ID']
     df_vista = st.session_state['df_registro_global'].drop(columns=columnas_a_ocultar, errors='ignore')
     
@@ -199,7 +199,7 @@ if not st.session_state['df_registro_global'].empty:
     
     df_vista = df_vista[nuevo_orden]
     
-    # Tabla interactiva con checkboxes integrados
+    # Tabla interactiva con checkboxes (num_rows="fixed" evita errores de tamaño al sincronizar)
     df_editado = st.data_editor(
         df_vista,
         column_config={
@@ -209,14 +209,16 @@ if not st.session_state['df_registro_global'].empty:
                 default=False,
             )
         },
-        disabled=columnas_intermedias, # Dejamos solo editable la selección y el estado si se requiere
+        disabled=columnas_intermedias,
         hide_index=True,
         use_container_width=True,
+        num_rows="fixed", 
         key="editor_tabla_registros"
     )
     
-    # Sincronizamos de vuelta el estado de los checkboxes marcados a la sesión principal
-    st.session_state['df_registro_global']['SELECCIONAR'] = df_editado['SELECCIONAR']
+    # Sincronizamos de vuelta el estado de los checkboxes marcados a la sesión principal con validación de tamaño
+    if len(df_editado) == len(st.session_state['df_registro_global']):
+        st.session_state['df_registro_global']['SELECCIONAR'] = df_editado['SELECCIONAR']
 
     col_b1, col_b2 = st.columns(2)
     with col_b1:
@@ -241,7 +243,7 @@ if not st.session_state['df_registro_global'].empty:
 
     st.divider()
 
-    # Preparamos el DataFrame limpio para exportar a Excel (sin columnas de control técnico)
+    # Preparamos el DataFrame limpio para exportar a Excel
     df_exportar = st.session_state['df_registro_global'].drop(columns=['SELECCIONAR', 'ID'], errors='ignore')
     
     output = io.BytesIO()
@@ -252,9 +254,4 @@ if not st.session_state['df_registro_global'].empty:
         label="📥 Descargar Registro Consolidado en Excel",
         data=output.getvalue(),
         file_name="Registro_Documentos_Cruce.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        type="secondary",
-        key="dl_excel_final"
-    )
-else:
-    st.info("💡 Sube tus documentos arriba para previsualizarlos, ver su extracción de datos automática y agregarlos al registro de control.")
+        mime="application/vnd.openxml
