@@ -1,9 +1,16 @@
 import io
 import re
-import fitz  # PyMuPDF para previsualización visual del PDF como imagen
+import fitz  # PyMuPDF para previsualización visual del PDF y para rasterizar en el fallback de OCR
 import pdfplumber
 import pandas as pd
 import streamlit as st
+
+try:
+  import pytesseract
+  from PIL import Image
+  OCR_DISPONIBLE = True
+except ImportError:
+  OCR_DISPONIBLE = False
 
 st.set_page_config(
     page_title="Gestión y Registro de Facturas", page_icon="📂", layout="wide"
@@ -15,7 +22,6 @@ Sube tus documentos PDF. El sistema normalizará los espacios de los RUTs y anal
 para extraer con absoluta precisión: **Nombre Emisor, RUT Emisor, Número de Documento, Nombre Deudor, RUT Deudor, Fecha de Emisión, Monto Neto, I.V.A 19% y Total**.
 """)
 
-# Columnas exactas solicitadas
 columnas_backend = [
     'SELECCIONAR',
     'ID',
@@ -76,11 +82,29 @@ PALABRAS_CORTE_DEUDOR = [
 ]
 
 
-# Función avanzada de extracción blindada contra espacios en RUTs, bloques DTE
-# y columnas fusionadas por pdfplumber
+def _extraer_texto_via_ocr(bytes_data):
+  """Respaldo para PDFs escaneados / sin capa de texto: rasteriza cada
+  página a imagen de alta resolución y aplica OCR (Tesseract) en español."""
+  texto_ocr = ''
+  if not OCR_DISPONIBLE:
+    return texto_ocr
+  try:
+    doc = fitz.open(stream=bytes_data, filetype='pdf')
+    for pagina in doc:
+      pix = pagina.get_pixmap(matrix=fitz.Matrix(300 / 72, 300 / 72))
+      img = Image.open(io.BytesIO(pix.tobytes('png')))
+      texto_ocr += pytesseract.image_to_string(img, lang='spa') + '\n'
+    doc.close()
+  except Exception as e:
+    print(f'Error en OCR: {e}')
+  return texto_ocr
+
+
 def extraer_datos_pdf(archivo_pdf):
   lineas_texto = []
   texto_completo = ''
+  usado_ocr = False
+  bytes_data = None
 
   try:
     bytes_data = archivo_pdf.read()
@@ -91,10 +115,15 @@ def extraer_datos_pdf(archivo_pdf):
         t = pagina.extract_text()
         if t:
           texto_completo += t + '\n'
-          for linea in t.split('\n'):
-            lineas_texto.append(linea.strip())
   except Exception as e:
     print(f'Error leyendo PDF: {e}')
+
+  # 🛠️ Si pdfplumber no encontró texto (PDF escaneado/imagen), usamos OCR
+  if len(texto_completo.strip()) < 20 and bytes_data:
+    texto_completo = _extraer_texto_via_ocr(bytes_data)
+    usado_ocr = True
+
+  lineas_texto = [l.strip() for l in texto_completo.split('\n') if l.strip()]
 
   # 🛠️ Solución para espacios fantasmas entre el guion y el dígito verificador del RUT
   texto_completo = re.sub(r'-\s+([0-9kK])', r'-\1', texto_completo)
@@ -118,7 +147,7 @@ def extraer_datos_pdf(archivo_pdf):
     linea_up = linea.upper()
     if any(
         k in linea_up
-        for k in ['SPA', 'LTDA', 'S.A.', 'E.I.R.L.', 'SOCIEDAD', 'PATAGONIA']
+        for k in ['SPA', 'LTDA', 'S.A.', 'E.I.R.L.', 'SOCIEDAD', 'PATAGONIA', 'LIMITADA']
     ):
       if 'GIRO:' not in linea_up and 'HUERTO' not in linea_up:
         nombre_emisor = linea
@@ -129,8 +158,6 @@ def extraer_datos_pdf(archivo_pdf):
         nombre_emisor = l
         break
 
-  # 🛠️ Corta el nombre del emisor si viene fusionado con el recuadro
-  # "FACTURA ELECTRONICA" de la columna vecina
   if nombre_emisor != 'No Detectado':
     nombre_emisor = _cortar_por_palabras_clave(
         nombre_emisor, PALABRAS_CORTE_EMISOR
@@ -164,7 +191,6 @@ def extraer_datos_pdf(archivo_pdf):
           r'SEÑOR\(ES\):?|SENOR\(ES\):?|SEÑOR\(ES\)', linea, flags=re.IGNORECASE
       )
       if len(partes) > 1 and partes[1].strip():
-        # 🛠️ Corta si "Fecha Emision:" u otra columna vecina quedó pegada
         texto_limpio = _cortar_por_palabras_clave(
             partes[1].strip(), PALABRAS_CORTE_DEUDOR
         )
@@ -178,8 +204,6 @@ def extraer_datos_pdf(archivo_pdf):
         texto_limpio = _cortar_por_palabras_clave(linea, PALABRAS_CORTE_DEUDOR)
         if texto_limpio:
           deudor_lineas.append(texto_limpio)
-        # Si esta línea traía una columna vecina fusionada, detenemos
-        # la captura aquí (ya llegamos al final del nombre del deudor)
         if texto_limpio != linea.strip():
           break
 
@@ -231,6 +255,7 @@ def extraer_datos_pdf(archivo_pdf):
       'MONTO NETO': monto_neto,
       'I.V.A 19%': iva_19,
       'TOTAL': total,
+      'OCR_USADO': usado_ocr,
   }
 
 
@@ -276,6 +301,12 @@ if archivos_subidos:
         obj.seek(0)
         datos = extraer_datos_pdf(obj)
         obj.seek(0)
+
+        if datos.get('OCR_USADO'):
+          if OCR_DISPONIBLE:
+            st.caption('🔎 Este PDF no tenía texto seleccionable — se usó OCR para leerlo.')
+          else:
+            st.warning('⚠️ Este PDF es una imagen escaneada y el OCR no está disponible en este entorno. Revisa que pytesseract y packages.txt (tesseract-ocr) estén instalados.')
 
         st.write(f"🏢 **Emisor:** {datos['NOMBRE EMISOR']}")
         st.write(f"🆔 **RUT Emisor:** {datos['RUT EMISOR']}")
