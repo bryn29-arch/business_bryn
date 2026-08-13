@@ -1,6 +1,6 @@
 import io
 import re
-import fitz  # PyMuPDF para previsualización visual
+import fitz  # PyMuPDF para previsualización visual del PDF como imagen
 import pdfplumber
 import pandas as pd
 import streamlit as st
@@ -11,7 +11,7 @@ st.set_page_config(
 
 st.title("📂 Extracción Automática y Registro de Documentos Tributarios")
 st.markdown("""
-Sube tus documentos PDF. El sistema analizará la estructura de la factura para extraer con precisión:
+Sube tus documentos PDF. El sistema analizará los bloques de la factura para extraer con precisión:
 **Nombre Emisor, RUT Emisor, Número de Documento, Nombre Deudor, RUT Deudor, Fecha de Emisión, Monto Neto, I.V.A 19% y Total**.
 """)
 
@@ -40,7 +40,7 @@ if 'df_registro_global' not in st.session_state:
 def limpiar_nombre_deudor(texto):
   if not texto:
     return 'No Detectado'
-  # Eliminar fechas largas o numéricas que a veces se mezclan en el bloque del deudor
+  # Eliminar fechas largas o numéricas que se mezclen en el bloque del deudor
   texto_limpio = re.sub(
       r'\b\d{1,2}\s+de\s+[a-zA-ZáéíóúÁÉÍÓÚñÑ]+\s+(?:de|del)\s+\d{2,4}\b',
       '',
@@ -51,7 +51,7 @@ def limpiar_nombre_deudor(texto):
   return re.sub(r'\s+', ' ', texto_limpio).strip().strip('-/_').strip()
 
 
-# Función robusta de extracción para DTEs de Chile
+# Función avanzada de extracción basada en bloques y etiquetas DTE
 def extraer_datos_pdf(archivo_pdf):
   lineas_texto = []
   texto_completo = ''
@@ -68,9 +68,35 @@ def extraer_datos_pdf(archivo_pdf):
           for linea in t.split('\n'):
             lineas_texto.append(linea.strip())
   except Exception as e:
-    st.error(f'Error al leer el PDF: {e}')
+    print(f'Error leyendo PDF: {e}')
 
-  # 1. Nombre Emisor (suele estar en las primeras líneas del documento)
+  # 1. Extracción precisa de RUTs (Emisor y Deudor) mediante etiquetas R.U.T.
+  ruts_etiquetados = re.findall(
+      r'R\.U\.T\.[:\s]*(\d{1,2}\.\d{3}\.\d{3}-[0-9kK]|\d{7,8}-[0-9kK])',
+      texto_completo,
+      re.IGNORECASE,
+  )
+  rut_emisor = (
+      ruts_etiquetados[0] if len(ruts_etiquetados) > 0 else 'No Detectado'
+  )
+  rut_deudor = (
+      ruts_etiquetados[1] if len(ruts_etiquetados) > 1 else 'No Detectado'
+  )
+
+  if rut_emisor == 'No Detectado' or rut_deudor == 'No Detectado':
+    # Respaldo general si las etiquetas varían
+    todos_ruts = re.findall(
+        r'\b(\d{1,2}\.\d{3}\.\d{3}-[0-9kK]|\d{7,8}-[0-9kK])\b', texto_completo
+    )
+    if len(todos_ruts) >= 2:
+      if rut_emisor == 'No Detectado':
+        rut_emisor = todos_ruts[0]
+      if rut_deudor == 'No Detectado':
+        rut_deudor = todos_ruts[1]
+    elif len(todos_ruts) == 1 and rut_emisor == 'No Detectado':
+      rut_emisor = todos_ruts[0]
+
+  # 2. Nombre Emisor
   nombre_emisor = 'No Detectado'
   for linea in lineas_texto[:6]:
     if any(
@@ -83,13 +109,6 @@ def extraer_datos_pdf(archivo_pdf):
       if len(l) > 3 and 'GIRO' not in l.upper() and 'HUERTO' not in l.upper():
         nombre_emisor = l
         break
-
-  # 2. RUTs (Emisor y Deudor)
-  ruts_encontrados = re.findall(
-      r'\b(\d{1,2}\.\d{3}\.\d{3}-[0-9kK]|\d{7,8}-[0-9kK])\b', texto_completo
-  )
-  rut_emisor = ruts_encontrados[0] if len(ruts_encontrados) > 0 else 'No Detectado'
-  rut_deudor = ruts_encontrados[1] if len(ruts_encontrados) > 1 else 'No Detectado'
 
   # 3. Número de Documento (Folio)
   num_doc = 'S/F'
@@ -107,7 +126,7 @@ def extraer_datos_pdf(archivo_pdf):
     if match_alt:
       num_doc = match_alt.group(1)
 
-  # 4. Nombre Deudor (Bloque Señor(es))
+  # 4. Nombre Deudor (Bloque Señor(es)) con limpieza de fecha integrada
   nombre_deudor = 'No Detectado'
   capturando = False
   deudor_lineas = []
@@ -146,212 +165,4 @@ def extraer_datos_pdf(archivo_pdf):
   total = '0'
 
   match_neto = re.search(
-      r'MONTO\s*NETO\s*\$?\s*([\d\.]+)', texto_completo, re.IGNORECASE
-  )
-  if match_neto:
-    monto_neto = match_neto.group(1)
-
-  match_iva = re.search(
-      r'I\.V\.A\.\s*19%\s*\$?\s*([\d\.]+)', texto_completo, re.IGNORECASE
-  )
-  if match_iva:
-    iva_19 = match_iva.group(1)
-
-  match_total = re.search(
-      r'TOTAL\s*\$?\s*([\d\.]+)', texto_completo, re.IGNORECASE
-  )
-  if match_total:
-    total = match_total.group(1)
-
-  return {
-      'NOMBRE EMISOR': nombre_emisor,
-      'RUT EMISOR': rut_emisor,
-      'NUMERO DE DOCUMENTO': num_doc,
-      'NOMBRE DEUDOR': nombre_deudor,
-      'RUT DEUDOR': rut_deudor,
-      'FECHA DE EMISION': fecha_emision,
-      'MONTO NETO': monto_neto,
-      'I.V.A 19%': iva_19,
-      'TOTAL': total,
-  }
-
-
-# 1. Carga de Archivos
-with st.container(border=True):
-  st.markdown('### 📥 Cargar Facturas o Documentos PDF')
-  archivos_subidos = st.file_uploader(
-      'Selecciona tus archivos PDF de respaldo:',
-      type=['pdf', 'xlsx', 'xls', 'csv'],
-      accept_multiple_files=True,
-      key='uploader_dte',
-  )
-
-if archivos_subidos:
-  st.divider()
-  st.markdown('### 👁️ Vista Previa y Datos Extraídos')
-  nombres = [a.name for a in archivos_subidos]
-  sel = st.selectbox('Selecciona archivo para revisar:', nombres)
-
-  obj = next((f for f in archivos_subidos if f.name == sel), None)
-
-  if obj:
-    ext = obj.name.split('.')[-1].lower()
-    c1, c2 = st.columns(2)
-
-    with c1:
-      st.markdown('#### Vista Previa Visual')
-      if ext == 'pdf':
-        try:
-          doc = fitz.open(stream=obj.read(), filetype='pdf')
-          if len(doc) > 0:
-            st.image(
-                doc[0].get_pixmap(dpi=120).tobytes('png'),
-                use_container_width=True,
-            )
-          obj.seek(0)
-        except Exception as e:
-          st.error(f'Error al previsualizar PDF: {e}')
-
-    with c2:
-      st.markdown('#### Datos Detectados')
-      if ext == 'pdf':
-        obj.seek(0)
-        datos = extraer_datos_pdf(obj)
-        obj.seek(0)
-
-        st.write(f"🏢 **Emisor:** {datos['NOMBRE EMISOR']}")
-        st.write(f"🆔 **RUT Emisor:** {datos['RUT EMISOR']}")
-        st.write(f"📄 **N° Documento:** {datos['NUMERO DE DOCUMENTO']}")
-        st.write(f"👤 **Deudor:** {datos['NOMBRE DEUDOR']}")
-        st.write(f"🆔 **RUT Deudor:** {datos['RUT DEUDOR']}")
-        st.write(f"📅 **Fecha Emisión:** {datos['FECHA DE EMISION']}")
-        st.write(f"💵 **Neto:** $ {datos['MONTO NETO']}")
-        st.write(f"📊 **IVA 19%:** $ {datos['I.V.A 19%']}")
-        st.write(f"💳 **Total:** $ {datos['TOTAL']}")
-
-  st.divider()
-  if st.button(
-      '➕ Confirmar y Registrar en la Planilla',
-      type='primary',
-      use_container_width=True,
-  ):
-    nuevos = []
-    for arc in archivos_subidos:
-      if (
-          arc.name
-          not in st.session_state['df_registro_global'][
-              'NOMBRE EMISOR'
-          ].values
-          and arc.name.lower().endswith('.pdf')
-      ):
-        arc.seek(0)
-        d = extraer_datos_pdf(arc)
-        arc.seek(0)
-
-        nuevos.append({
-            'SELECCIONAR': False,
-            'ID': f'{arc.name}_{arc.size}',
-            'NOMBRE EMISOR': d['NOMBRE EMISOR'],
-            'RUT EMISOR': d['RUT EMISOR'],
-            'NUMERO DE DOCUMENTO': d['NUMERO DE DOCUMENTO'],
-            'NOMBRE DEUDOR': d['NOMBRE DEUDOR'],
-            'RUT DEUDOR': d['RUT DEUDOR'],
-            'FECHA DE EMISION': d['FECHA DE EMISION'],
-            'MONTO NETO': d['MONTO NETO'],
-            'I.V.A 19%': d['I.V.A 19%'],
-            'TOTAL': d['TOTAL'],
-            'ESTADO': 'Registrado y Validado',
-        })
-
-    if nuevos:
-      df_nuevo = pd.DataFrame(nuevos)
-      st.session_state['df_registro_global'] = pd.concat(
-          [st.session_state['df_registro_global'], df_nuevo], ignore_index=True
-      )
-      st.success(
-          f'✅ ¡Se han registrado {len(nuevos)} documentos con la estructura'
-          ' solicitada!'
-      )
-      st.rerun()
-    else:
-      st.warning('⚠️ Los documentos seleccionados ya están registrados.')
-
-# Tabla Principal Consolidada
-if not st.session_state['df_registro_global'].empty:
-  st.divider()
-  st.subheader('📋 Planilla Consolidada de Registro')
-
-  df_vista = st.session_state['df_registro_global'].drop(
-      columns=['ID'], errors='ignore'
-  )
-
-  cols_intermedias = [
-      c for c in df_vista.columns if c not in ['SELECCIONAR', 'ESTADO']
-  ]
-  orden_final = ['SELECCIONAR'] + cols_intermedias + ['ESTADO']
-  df_vista = df_vista[orden_final]
-
-  df_editado = st.data_editor(
-      df_vista,
-      column_config={
-          'SELECCIONAR': st.column_config.CheckboxColumn(
-              '🗑️ Seleccionar', default=False
-          )
-      },
-      disabled=cols_intermedias,
-      hide_index=True,
-      use_container_width=True,
-      num_rows='fixed',
-      key='tabla_maestra_dte',
-  )
-
-  if len(df_editado) == len(st.session_state['df_registro_global']):
-    st.session_state['df_registro_global']['SELECCIONAR'] = df_editado[
-        'SELECCIONAR'
-    ]
-
-  col1, col2 = st.columns(2)
-  with col1:
-    if st.button('❌ Eliminar Filas Seleccionadas', type='primary'):
-      mantener = st.session_state['df_registro_global'][
-          st.session_state['df_registro_global']['SELECCIONAR'] == False
-      ]
-      borrados = len(st.session_state['df_registro_global']) - len(mantener)
-      if borrados > 0:
-        st.session_state['df_registro_global'] = mantener
-        st.success(f'🗑️ Se eliminaron {borrados} registros.')
-        st.rerun()
-      else:
-        st.warning('Selecciona al menos una casilla.')
-  with col2:
-    if st.button('⚠️ Vaciar Todo'):
-      st.session_state['df_registro_global'] = pd.DataFrame(
-          columns=columnas_backend
-      )
-      st.success('Historial reiniciado.')
-      st.rerun()
-
-  st.divider()
-
-  df_excel = st.session_state['df_registro_global'].drop(
-      columns=['SELECCIONAR', 'ID'], errors='ignore'
-  )
-  output = io.BytesIO()
-  with pd.ExcelWriter(output, engine='openpyxl') as writer:
-    df_excel.to_excel(writer, sheet_name='Registro_Facturas', index=False)
-
-  st.download_button(
-      label='📥 Descargar Planilla Consolidada en Excel',
-      data=output.getvalue(),
-      file_name='Registro_Facturas_Consolidado.xlsx',
-      mime=(
-          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-      ),
-      type='secondary',
-      key='dl_excel_dte',
-  )
-else:
-  st.info(
-      '💡 Sube tus documentos PDF arriba para procesarlos y construir la'
-      ' planilla de registro.'
-  )
+      r'MONTO\s*NETO\s*\$?\s*([\d\.]+)', texto_completo
