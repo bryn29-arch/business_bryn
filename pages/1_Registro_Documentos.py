@@ -13,19 +13,21 @@ st.set_page_config(
 
 st.title("📂 Extracción Inteligente y Registro de Documentos (PDF, Excel, CSV)")
 st.markdown("""
-Sube tus documentos de respaldo. El sistema **extraerá automáticamente los datos clave** (Fecha de Emisión, RUT, Folio, Monto e IVA) 
-y podrás gestionar la tabla marcando con un **check** las filas que desees eliminar.
+Sube tus documentos de respaldo. El sistema **limpiará y analizará la estructura del PDF** para extraer con precisión 
+la **Fecha de Emisión, RUT, N° Documento, Monto e IVA**, permitiéndote validarlos, registrarlos y gestionarlos.
 """)
 
-# Inicializar memoria de sesión con la columna 'FECHA EMISIÓN'
+# Inicializar memoria de sesión con las columnas requeridas
 if 'df_registro_global' not in st.session_state:
     st.session_state['df_registro_global'] = pd.DataFrame(columns=[
         'SELECCIONAR', 'ID', 'NOMBRE DE ARCHIVO', 'FECHA EMISIÓN', 'RUT', 'N° DOCUMENTO', 'MONTO', 'IVA', 'TIPO', 'TAMAÑO', 'ESTADO'
     ])
 
-# Función inteligente para extraer datos clave desde el texto de un PDF
+# Función de limpieza y extracción estructurada optimizada para PDFs de documentos tributarios
 def extraer_datos_pdf(archivo_pdf):
+    lineas_texto = []
     texto_completo = ""
+    
     try:
         bytes_data = archivo_pdf.read()
         archivo_pdf.seek(0)
@@ -35,28 +37,75 @@ def extraer_datos_pdf(archivo_pdf):
                 t = pagina.extract_text()
                 if t:
                     texto_completo += t + "\n"
+                    for linea in t.split('\n'):
+                        lineas_texto.append(linea.strip())
     except Exception as e:
         print(f"Error leyendo PDF: {e}")
 
-    rut_match = re.search(r'\b\d{1,2}\.\d{3}\.\d{3}-[0-9kK]\b|\b\d{7,8}-[0-9kK]\b', texto_completo)
-    rut_encontrado = rut_match.group(0) if rut_match else "No Detectado"
+    # 1. Extracción de RUT (Busca patrones de RUT chileno con o sin puntos)
+    rut_encontrado = "No Detectado"
+    for linea in lineas_texto:
+        match_rut = re.search(r'\b(\d{1,2}\.\d{3}\.\d{3}-[0-9kK]|\d{7,8}-[0-9kK])\b', linea)
+        if match_rut:
+            rut_encontrado = match_rut.group(1)
+            break
+    if rut_encontrado == "No Detectado":
+        match_global_rut = re.search(r'\b(\d{1,2}\.\d{3}\.\d{3}-[0-9kK]|\d{7,8}-[0-9kK])\b', texto_completo)
+        if match_global_rut:
+            rut_encontrado = match_global_rut.group(1)
 
-    # Búsqueda optimizada para fecha de emisión (prioriza etiquetas o formato DD/MM/YYYY)
-    fecha_match = re.search(r'(?:Fecha\s*(?:de)?\s*Emisi[oó]n|Emisi[oó]n)[\s.:#]*(\b\d{2}[-/]\d{2}[-/]\d{4}\b)', texto_completo, re.IGNORECASE)
-    if not fecha_match:
-        # Búsqueda general de fecha si no encuentra la etiqueta exacta
-        fecha_match = re.search(r'\b\d{2}[-/]\d{2}[-/]\d{4}\b', texto_completo)
-    
-    fecha_encontrada = fecha_match.group(1) if fecha_match and len(fecha_match.groups()) > 0 else (fecha_match.group(0) if fecha_match else "No Detectada")
+    # 2. Extracción de Fecha de Emisión (Busca etiquetas específicas o formato de fecha)
+    fecha_encontrada = "No Detectada"
+    for linea in lineas_texto:
+        if re.search(r'emisi[oó]n|fecha', linea, re.IGNORECASE):
+            match_f = re.search(r'\b(\d{2}[-/]\d{2}[-/]\d{4})\b', linea)
+            if match_f:
+                fecha_encontrada = match_f.group(1)
+                break
+    if fecha_encontrada == "No Detectada":
+        match_gen_f = re.search(r'\b(\d{2}[-/]\d{2}[-/]\d{4})\b', texto_completo)
+        if match_gen_f:
+            fecha_encontrada = match_gen_f.group(1)
 
-    folio_match = re.search(r'(?:Folio|N°|Factura|Boleta)[\s.:#]*(\d+)', texto_completo, re.IGNORECASE)
-    folio_encontrado = folio_match.group(1) if folio_match else "S/F"
+    # 3. Extracción de N° Documento / Folio
+    folio_encontrado = "S/F"
+    for linea in lineas_texto:
+        if re.search(r'folio|n°\s*d[oé]c|factura|boleta', linea, re.IGNORECASE):
+            match_fol = re.search(r'(?:folio|n°|factura|boleta)[\s.:#]*(\d+)', linea, re.IGNORECASE)
+            if match_fol:
+                folio_encontrado = match_fol.group(1)
+                break
+    if folio_encontrado == "S/F":
+        # Busca números grandes que suelan ser folios tras la cabecera
+        match_alt_fol = re.search(r'(?:N[º°]\s*)(\d{3,10})', texto_completo, re.IGNORECASE)
+        if match_alt_fol:
+            folio_encontrado = match_alt_fol.group(1)
 
-    posibles_montos = re.findall(r'\$\s*([\d{1,3}(?:\.\d{3})*]+)', texto_completo)
-    monto_encontrado = posibles_montos[-1] if posibles_montos else "0"
+    # 4. Extracción de IVA
+    iva_encontrado = "0"
+    for linea in lineas_texto:
+        if re.search(r'\biva\b', linea, re.IGNORECASE):
+            match_iva = re.search(r'(?:\$\s*)?([\d{1,3}(?:\.\d{3})+|\d+])', linea)
+            # Buscamos números asociados a la línea de IVA
+            numeros_en_linea = re.findall(r'([\d{1,3}(?:\.\d{3})*]+)', linea)
+            if numeros_en_linea:
+                # Tomamos el último número numérico válido de la línea de IVA
+                iva_encontrado = numeros_en_linea[-1]
+                break
 
-    iva_match = re.search(r'IVA[\s.:\$]*([\d{1,3}(?:\.\d{3})*]+)', texto_completo, re.IGNORECASE)
-    iva_encontrado = iva_match.group(1) if iva_match else "0"
+    # 5. Extracción de Monto Total (Busca etiquetas de Total o el valor financiero más alto)
+    monto_encontrado = "0"
+    for linea in lineas_texto:
+        if re.search(r'total\s*(?:a\s*pago|monto|gs)?', linea, re.IGNORECASE):
+            numeros_monto = re.findall(r'([\d{1,3}(?:\.\d{3})*]+)', linea)
+            if numeros_monto:
+                monto_encontrado = numeros_monto[-1]
+
+    # Respaldo si el monto total no se encontró con la etiqueta estricta
+    if monto_encontrado == "0" or monto_encontrado == "":
+        todos_los_montos = re.findall(r'\$\s*([\d{1,3}(?:\.\d{3})*]+)', texto_completo)
+        if todos_los_montos:
+            monto_encontrado = todos_los_montos[-1]
 
     return {
         'FECHA EMISIÓN': fecha_encontrada,
@@ -79,10 +128,10 @@ with st.container(border=True):
 # 2. Vista Previa Directa y Extracción de Datos
 if archivos_subidos:
     st.divider()
-    st.markdown("### 👁️ 2. Vista Previa y Datos Extraídos Automáticamente")
+    st.markdown("### 👁️ 2. Vista Previa y Limpieza de Datos Extraídos")
     
     nombres_archivos = [a.name for a in archivos_subidos]
-    archivo_sel = st.selectbox("Selecciona un archivo para previsualizar y revisar sus datos:", nombres_archivos)
+    archivo_sel = st.selectbox("Selecciona un archivo para previsualizar y revisar su limpieza de datos:", nombres_archivos)
     
     archivo_obj = next((f for f in archivos_subidos if f.name == archivo_sel), None)
     
@@ -124,18 +173,18 @@ if archivos_subidos:
                     st.error(f"Error al leer CSV: {e}")
 
         with col_v2:
-            st.markdown("#### 🔍 Datos Extraídos del Documento")
+            st.markdown("#### 🔍 Datos Limpios y Estructurados")
             if ext == 'pdf':
                 archivo_obj.seek(0)
                 datos_extraidos = extraer_datos_pdf(archivo_obj)
                 archivo_obj.seek(0)
                 
-                st.info("💡 Estos son los datos detectados automáticamente.")
+                st.info("💡 Limpieza de columnas aplicada correctamente:")
                 st.metric("📅 Fecha de Emisión", datos_extraidos['FECHA EMISIÓN'])
                 st.metric("🏢 RUT Identificado", datos_extraidos['RUT'])
                 st.metric("📄 N° de Documento / Folio", datos_extraidos['N° DOCUMENTO'])
                 st.metric("💰 Monto Total", f"$ {datos_extraidos['MONTO']}")
-                st.metric("📊 IVA Estimado", f"$ {datos_extraidos['IVA']}")
+                st.metric("📊 IVA Extraído", f"$ {datos_extraidos['IVA']}")
             else:
                 st.success("✅ Archivo tabular (Excel/CSV) listo para ser incorporado al registro de control.")
 
@@ -181,7 +230,7 @@ if archivos_subidos:
             st.session_state['df_registro_global'] = pd.concat(
                 [st.session_state['df_registro_global'], df_nuevo], ignore_index=True
             )
-            st.success(f"✅ ¡Se han registrado {len(nuevos)} archivos correctamente!")
+            st.success(f"✅ ¡Se han registrado {len(nuevos)} archivos correctamente tras la limpieza de datos!")
             st.rerun()
         else:
             st.warning("⚠️ Todos los archivos seleccionados ya se encontraban registrados previamente.")
@@ -192,11 +241,9 @@ if not st.session_state['df_registro_global'].empty:
     st.subheader("📋 Historial Consolidado de Documentos Registrados")
     st.markdown("Marca la casilla (**`SELECCIONAR`**) en la tabla de abajo de los documentos que deseas eliminar y haz clic en el botón de borrado:")
     
-    # Ocultamos metadatos innecesarios en la vista
     columnas_a_ocultar = ['NOMBRE DE ARCHIVO', 'TIPO', 'TAMAÑO', 'ID']
     df_vista = st.session_state['df_registro_global'].drop(columns=columnas_a_ocultar, errors='ignore')
     
-    # Reordenamos: 'SELECCIONAR' al principio, datos en medio y 'ESTADO' al final
     columnas_intermedias = [col for col in df_vista.columns if col not in ['SELECCIONAR', 'ESTADO']]
     nuevo_orden = []
     if 'SELECCIONAR' in df_vista.columns:
@@ -207,7 +254,6 @@ if not st.session_state['df_registro_global'].empty:
     
     df_vista = df_vista[nuevo_orden]
     
-    # Tabla interactiva con checkboxes
     df_editado = st.data_editor(
         df_vista,
         column_config={
@@ -265,4 +311,4 @@ if not st.session_state['df_registro_global'].empty:
         key="dl_excel_final"
     )
 else:
-    st.info("💡 Sube tus documentos arriba para previsualizarlos, ver su extracción de datos automática y agregarlos al registro de control.")
+    st.info("💡 Sube tus documentos arriba para previsualizarlos, validar su limpieza y agregarlos al registro de control.")
