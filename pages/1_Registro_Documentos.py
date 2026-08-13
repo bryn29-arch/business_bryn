@@ -11,8 +11,7 @@ st.set_page_config(
 
 st.title("📂 Extracción Automática y Registro de Documentos Tributarios")
 st.markdown("""
-Sube tus documentos PDF. El sistema analizará los bloques de la factura utilizando la regla de orden de los RUTs 
-para extraer con precisión: **Nombre Emisor, RUT Emisor, Número de Documento, Nombre Deudor, RUT Deudor, Fecha de Emisión, Monto Neto, I.V.A 19% y Total**.
+Sube tus documentos PDF. El sistema analizará la estructura de la factura detectando etiquetas **R.U.T.:** para asignar con precisión el **RUT Emisor** y el **RUT Deudor**, junto a todos los demás datos clave.
 """)
 
 # Columnas exactas solicitadas
@@ -51,7 +50,7 @@ def limpiar_nombre_deudor(texto):
   return re.sub(r'\s+', ' ', texto_limpio).strip().strip('-/_').strip()
 
 
-# Función avanzada de extracción aplicando la regla de oro de los RUTs
+# Función avanzada de extracción con detección inteligente basada en la posición de "SEÑOR"
 def extraer_datos_pdf(archivo_pdf):
   lineas_texto = []
   texto_completo = ''
@@ -70,12 +69,44 @@ def extraer_datos_pdf(archivo_pdf):
   except Exception as e:
     print(f'Error leyendo PDF: {e}')
 
-  # 1. Regla de oro para los RUTs: El primero es del Emisor, el que sigue es del Deudor
+  # 1. Extracción y separación inteligente de RUTs (Emisor y Deudor)
+  # Detecta formato estándar (con o sin puntos, incluyendo R.U.T. / RUT:)
   todos_ruts = re.findall(
       r'\b(\d{1,2}\.\d{3}\.\d{3}-[0-9kK]|\d{7,8}-[0-9kK])\b', texto_completo
   )
-  rut_emisor = todos_ruts[0] if len(todos_ruts) > 0 else 'No Detectado'
-  rut_deudor = todos_ruts[1] if len(todos_ruts) > 1 else 'No Detectado'
+  ruts_unicos = []
+  for r in todos_ruts:
+    if r not in ruts_unicos:
+      ruts_unicos.append(r)
+
+  rut_emisor = 'No Detectado'
+  rut_deudor = 'No Detectado'
+
+  if len(ruts_unicos) >= 2:
+    # Ubicamos la palabra clave del bloque del deudor ("SEÑOR")
+    pos_senor = texto_completo.upper().find('SEÑOR')
+    pos_ruts = [(r, texto_completo.find(r)) for r in ruts_unicos]
+
+    ruts_antes_senor = [r for r, p in pos_ruts if pos_senor == -1 or p < pos_senor]
+    ruts_despues_senor = [
+        r for r, p in pos_ruts if pos_senor != -1 and p > pos_senor
+    ]
+
+    if ruts_antes_senor:
+      rut_emisor = ruts_antes_senor[0]
+    elif ruts_unicos:
+      rut_emisor = ruts_unicos[0]
+
+    if ruts_despues_senor:
+      rut_deudor = ruts_despues_senor[0]
+    else:
+      # Si no hay posterior, tomamos el segundo RUT único disponible
+      for r in ruts_unicos:
+        if r != rut_emisor:
+          rut_deudor = r
+          break
+  elif len(ruts_unicos) == 1:
+    rut_emisor = ruts_unicos[0]
 
   # 2. Nombre Emisor
   nombre_emisor = 'No Detectado'
@@ -121,7 +152,11 @@ def extraer_datos_pdf(archivo_pdf):
         deudor_lineas.append(partes[1].strip())
       continue
     if capturando:
-      if 'R.U.T.:' in linea.upper() or 'GIRO:' in linea.upper():
+      if (
+          'R.U.T.:' in linea.upper()
+          or 'RUT:' in linea.upper()
+          or 'GIRO:' in linea.upper()
+      ):
         break
       if linea:
         deudor_lineas.append(linea)
