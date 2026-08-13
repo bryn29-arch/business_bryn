@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import io
-import base64
 
 st.set_page_config(
     page_title="Gestión y Registro de Documentos",
@@ -11,8 +10,8 @@ st.set_page_config(
 
 st.title("📂 Registro, Previsualización y Control de Documentos")
 st.markdown("""
-Sube tus documentos de respaldo (PDFs, Excel, CSV), revísalos en la vista previa para asegurarte de que son los correctos, 
-regístralos oficialmente y **elimina cualquier archivo** del historial si cometiste un error.
+Sube tus documentos de respaldo (PDFs, Excel, CSV), revísalos de forma segura, 
+regístralos oficialmente y **elimina cualquier archivo** del historial si es necesario.
 """)
 
 # Inicializar memoria de sesión para el registro acumulativo
@@ -31,7 +30,7 @@ with st.container(border=True):
         key="uploader_principal"
     )
 
-# 2. Vista Previa y Validación antes del registro
+# 2. Vista Previa y Validación antes del registro (Sin bloqueos de Chrome)
 if archivos_subidos:
     st.divider()
     st.markdown("### 👁️ 2. Vista Previa y Validación")
@@ -45,12 +44,18 @@ if archivos_subidos:
         ext = archivo_obj.name.split('.')[-1].lower()
         
         if ext == 'pdf':
-            try:
-                base64_pdf = base64.b64encode(archivo_obj.read()).decode('utf-8')
-                pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="450px" type="application/pdf"></iframe>'
-                st.markdown(pdf_display, unsafe_allow_html=True)
-            except Exception as e:
-                st.error(f"Error al mostrar la vista previa del PDF: {e}")
+            st.info(f"📄 Archivo PDF seleccionado: **{archivo_obj.name}** ({round(archivo_obj.size / 1024, 2)} KB)")
+            st.markdown("*(Los navegadores bloquean visores directos por seguridad. Puedes descargar o verificar el archivo de forma segura abajo)*")
+            
+            # Botón nativo seguro para descargar/ver el PDF sin que Chrome lo bloquee
+            st.download_button(
+                label=f"🔍 Abrir / Descargar Vista Previa de {archivo_obj.name}",
+                data=archivo_obj.getvalue(),
+                file_name=archivo_obj.name,
+                mime="application/pdf",
+                key=f"preview_pdf_{archivo_obj.name}"
+            )
+            
         elif ext in ['xlsx', 'xls']:
             try:
                 df_prev = pd.read_excel(archivo_obj)
@@ -100,7 +105,6 @@ if not st.session_state['df_registro_global'].empty:
     st.subheader("📋 Historial de Documentos Registrados")
     st.markdown(f"Total de documentos guardados: **{len(st.session_state['df_registro_global'])}**")
     
-    # Mostrar tabla limpia sin la columna técnica ID
     df_mostrar = st.session_state['df_registro_global'].drop(columns=['ID'])
     st.dataframe(df_mostrar, use_container_width=True)
     
@@ -131,7 +135,6 @@ if not st.session_state['df_registro_global'].empty:
 
     st.divider()
 
-    # Botón de Descarga General en Excel
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df_mostrar.to_excel(writer, sheet_name='Registro_Documentos', index=False)
@@ -145,4 +148,4 @@ if not st.session_state['df_registro_global'].empty:
         key="dl_excel_final"
     )
 else:
-    st.info("💡 Sube tus documentos arriba para previsualizarlos, validarlos y agregarlos al registro de control.")
+    st.info("💡 Sube tus documentos arriba para validarlos y agregarlos al registro de control.")
