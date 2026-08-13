@@ -84,20 +84,29 @@ PALABRAS_CORTE_DEUDOR = [
 
 def _extraer_texto_via_ocr(bytes_data):
   """Respaldo para PDFs escaneados / sin capa de texto: rasteriza cada
-  página a imagen de alta resolución y aplica OCR (Tesseract) en español."""
+  página (máx. 2, una factura casi nunca necesita más) a imagen y aplica
+  OCR (Tesseract) en español. 220 DPI da buen equilibrio precisión/velocidad."""
   texto_ocr = ''
   if not OCR_DISPONIBLE:
     return texto_ocr
   try:
     doc = fitz.open(stream=bytes_data, filetype='pdf')
-    for pagina in doc:
-      pix = pagina.get_pixmap(matrix=fitz.Matrix(300 / 72, 300 / 72))
+    for pagina in doc[:2]:
+      pix = pagina.get_pixmap(matrix=fitz.Matrix(220 / 72, 220 / 72))
       img = Image.open(io.BytesIO(pix.tobytes('png')))
       texto_ocr += pytesseract.image_to_string(img, lang='spa') + '\n'
     doc.close()
   except Exception as e:
     print(f'Error en OCR: {e}')
   return texto_ocr
+
+
+@st.cache_data(show_spinner=False)
+def _extraer_texto_via_ocr_cacheado(bytes_data):
+  """Versión cacheada: evita repetir el OCR (lento) cuando el mismo
+  archivo se procesa más de una vez (ej. al previsualizar y luego al
+  confirmar el registro)."""
+  return _extraer_texto_via_ocr(bytes_data)
 
 
 def extraer_datos_pdf(archivo_pdf):
@@ -120,13 +129,19 @@ def extraer_datos_pdf(archivo_pdf):
 
   # 🛠️ Si pdfplumber no encontró texto (PDF escaneado/imagen), usamos OCR
   if len(texto_completo.strip()) < 20 and bytes_data:
-    texto_completo = _extraer_texto_via_ocr(bytes_data)
+    texto_completo = _extraer_texto_via_ocr_cacheado(bytes_data)
     usado_ocr = True
 
   lineas_texto = [l.strip() for l in texto_completo.split('\n') if l.strip()]
 
   # 🛠️ Solución para espacios fantasmas entre el guion y el dígito verificador del RUT
   texto_completo = re.sub(r'-\s+([0-9kK])', r'-\1', texto_completo)
+
+  # 🛠️ Corrige un error típico del OCR: el símbolo "Nº" se lee muchas
+  # veces como "N2" (Tesseract confunde el símbolo de grado con el
+  # dígito 2), lo que agrega un "2" de más al inicio del folio.
+  if usado_ocr:
+    texto_completo = re.sub(r'\bN2(\d{3,7})\b', r'Nº\1', texto_completo)
 
   # 1. Extracción de RUTs por orden estricto de aparición (1° Emisor, 2° Deudor)
   todos_ruts = re.findall(
@@ -234,7 +249,9 @@ def extraer_datos_pdf(archivo_pdf):
     monto_neto = match_neto.group(1)
 
   match_iva = re.search(
-      r'I\.V\.A\.\s*19%\s*\$?\s*([\d\.]+)', texto_completo, re.IGNORECASE
+      r'[I1l]\.?\s?V\.?\s?A\.?\s*19\s*%\s*\$?\s*([\d\.]+)',
+      texto_completo,
+      re.IGNORECASE,
   )
   if match_iva:
     iva_19 = match_iva.group(1)
