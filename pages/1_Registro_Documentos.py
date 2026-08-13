@@ -1,56 +1,140 @@
-import fitz  # PyMuPDF
-import numpy as np
+import io
+import re
+import fitz  # PyMuPDF para previsualización visual
 import pdfplumber
+import pandas as pd
 import pytesseract
-from PIL import Image
+import streamlit as st
+
+st.set_page_config(
+    page_title="Gestión y Registro de Facturas", page_icon="📂", layout="wide"
+)
+
+st.title("📂 Extracción Automática y Registro de Documentos Tributarios")
+st.markdown("""
+Sube tus documentos PDF. El sistema analizará la estructura de la factura para extraer con precisión:
+**Nombre Emisor, RUT Emisor, Número de Documento, Nombre Deudor, RUT Deudor, Fecha de Emisión, Monto Neto, I.V.A 19% y Total**.
+""")
+
+# Columnas exactas solicitadas
+columnas_backend = [
+    'SELECCIONAR',
+    'ID',
+    'NOMBRE EMISOR',
+    'RUT EMISOR',
+    'NUMERO DE DOCUMENTO',
+    'NOMBRE DEUDOR',
+    'RUT DEUDOR',
+    'FECHA DE EMISION',
+    'MONTO NETO',
+    'I.V.A 19%',
+    'TOTAL',
+    'ESTADO',
+]
+
+if 'df_registro_global' not in st.session_state:
+  st.session_state['df_registro_global'] = pd.DataFrame(
+      columns=columnas_backend
+  )
 
 
-def extraer_texto_pdf_robusto(uploaded_file):
-  """Extrae texto de un PDF.
+def limpiar_nombre_deudor(texto):
+  if not texto:
+    return 'No Detectado'
+  # Eliminar fechas largas o numéricas que a veces se mezclan en el bloque del deudor
+  texto_limpio = re.sub(
+      r'\b\d{1,2}\s+de\s+[a-zA-ZáéíóúÁÉÍÓÚñÑ]+\s+(?:de|del)\s+\d{2,4}\b',
+      '',
+      texto,
+      flags=re.IGNORECASE,
+  )
+  texto_limpio = re.sub(r'\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b', '', texto_limpio)
+  return re.sub(r'\s+', ' ', texto_limpio).strip().strip('-/_').strip()
 
-  Primero intenta con pdfplumber y PyMuPDF. Si no detecta texto (PDF escaneado),
-  aplica OCR usando pdf2image y pytesseract.
-  """
+
+# Función robusta de extracción para DTEs de Chile
+def extraer_datos_pdf(archivo_pdf):
+  lineas_texto = []
   texto_completo = ''
 
-  # Intentar extraer texto con pdfplumber primero
   try:
-    with pdfplumber.open(uploaded_file) as pdf:
+    bytes_data = archivo_pdf.read()
+    archivo_pdf.seek(0)
+
+    with pdfplumber.open(io.BytesIO(bytes_data)) as pdf:
       for pagina in pdf.pages:
-        texto_pag = pagina.extract_text()
-        if texto_pag:
-          texto_completo += texto_pag + '\n'
+        t = pagina.extract_text()
+        if t:
+          texto_completo += t + '\n'
+          for linea in t.split('\n'):
+            lineas_texto.append(linea.strip())
   except Exception as e:
-    print(f'Error con pdfplumber: {e}')
+    st.error(f'Error al leer el PDF: {e}')
 
-  # Si el texto extraído es muy corto o vacío, probablemente sea un PDF escaneado
-  if len(texto_completo.strip()) < 50:
-    print(
-        'El PDF parece ser una imagen o escaneo. Aplicando OCR (Modo'
-        ' Blindado)...'
+  # 1. Nombre Emisor (suele estar en las primeras líneas del documento)
+  nombre_emisor = 'No Detectado'
+  for linea in lineas_texto[:6]:
+    if any(
+        k in linea.upper() for k in ['SPA', 'LTDA', 'S.A.', 'E.I.R.L.', 'SOCIEDAD']
+    ):
+      nombre_emisor = linea
+      break
+  if nombre_emisor == 'No Detectado' and len(lineas_texto) > 1:
+    for l in lineas_texto[1:5]:
+      if len(l) > 3 and 'GIRO' not in l.upper() and 'HUERTO' not in l.upper():
+        nombre_emisor = l
+        break
+
+  # 2. RUTs (Emisor y Deudor)
+  ruts_encontrados = re.findall(
+      r'\b(\d{1,2}\.\d{3}\.\d{3}-[0-9kK]|\d{7,8}-[0-9kK])\b', texto_completo
+  )
+  rut_emisor = ruts_encontrados[0] if len(ruts_encontrados) > 0 else 'No Detectado'
+  rut_deudor = ruts_encontrados[1] if len(ruts_encontrados) > 1 else 'No Detectado'
+
+  # 3. Número de Documento (Folio)
+  num_doc = 'S/F'
+  match_folio = re.search(
+      r'(?:N[º°]|Nº|N°)\s*(\d+)', texto_completo, re.IGNORECASE
+  )
+  if match_folio:
+    num_doc = match_folio.group(1)
+  else:
+    match_alt = re.search(
+        r'FACTURA\s+ELECTRONICA.*?N[º°]?\s*(\d+)',
+        texto_completo,
+        re.DOTALL | re.IGNORECASE,
     )
-    texto_completo = ''
-    try:
-      # Reiniciar el puntero del archivo subido en Streamlit
-      uploaded_file.seek(0)
-      # Leer el PDF con PyMuPDF (fitz) para convertir páginas a imágenes
-      doc = fitz.open(stream=uploaded_file.read(), filetype='pdf')
+    if match_alt:
+      num_doc = match_alt.group(1)
 
-      for i, pagina in enumerate(doc):
-        # Renderizar página a imagen (resolución de 300 DPI para buen OCR)
-        pix = pagina.get_pixmap(dpi=300)
-        img_bytes = pix.tobytes('png')
+  # 4. Nombre Deudor (Bloque Señor(es))
+  nombre_deudor = 'No Detectado'
+  capturando = False
+  deudor_lineas = []
+  for linea in lineas_texto:
+    if 'SEÑOR(ES)' in linea.upper() or 'SENOR(ES)' in linea.upper():
+      capturando = True
+      partes = re.split(
+          r'SEÑOR\(ES\):?|SENOR\(ES\):?', linea, flags=re.IGNORECASE
+      )
+      if len(partes) > 1 and partes[1].strip():
+        deudor_lineas.append(partes[1].strip())
+      continue
+    if capturando:
+      if 'R.U.T.:' in linea.upper() or 'GIRO:' in linea.upper():
+        break
+      if linea:
+        deudor_lineas.append(linea)
+  if deudor_lineas:
+    nombre_deudor = limpiar_nombre_deudor(' '.join(deudor_lineas))
 
-        # Convertir bytes a imagen de PIL
-        import io
-
-        imagen = Image.open(io.BytesIO(img_bytes))
-
-        # Aplicar OCR en español
-        texto_ocr = pytesseract.image_to_string(imagen, lang='spa')
-        texto_completo += texto_ocr + '\n'
-
-    except Exception as e:
-      print(f'Error al aplicar OCR: {e}')
-
-  return texto_completo
+  # 5. Fecha de Emisión
+  fecha_emision = 'No Detectada'
+  match_fecha = re.search(
+      r'Fecha\s*Emision[:\s]*([^\n]+)', texto_completo, re.IGNORECASE
+  )
+  if match_fecha:
+    fecha_emision = match_fecha.group(1).strip()
+  else:
+    match_f_alt =
